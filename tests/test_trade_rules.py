@@ -725,3 +725,65 @@ def test_slippage_does_not_change_time_exit_trigger_timing():
         base_trade["fills"][-1]["holding_days"]
         == slipped_trade["fills"][-1]["holding_days"]
     )
+
+
+def test_whole_position_atr_trailing_precedes_secondary_fixed_tp():
+    df = make_stock_df(
+        [
+            (100, 110, 99, 109),
+            (105, 106, 104, 105),
+            (105, 105, 104, 104),
+        ]
+    )
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            enable_take_profit=True,
+            take_profit_pct=5.0,
+            enable_atr_trailing_exit=True,
+            atr_trailing_period=1,
+            atr_trailing_multiplier=0.5,
+            enable_profit_drawdown_exit=False,
+            enable_ma_exit=False,
+            stop_loss_pct=50.0,
+            time_stop_days=2,
+            time_stop_target_pct=-50.0,
+        ),
+    )
+    trade = require_trade(trade, reason)
+    assert trade["fills"][-1]["exit_type"] == "atr_trailing"
+    assert trade["entry_reason"] == "gap.strict_break.up"
+    assert "atr_trailing" in trade["exit_reason"]
+
+
+def test_partial_atr_trailing_can_exit_remaining_position_after_fixed_tp():
+    rules = (
+        PartialExitRule(True, 50, "fixed_tp", 1, target_profit_pct=10.0),
+        PartialExitRule(True, 50, "atr_trailing", 2, atr_period=1, atr_multiplier=0.5),
+    )
+    df = make_stock_df(
+        [
+            (100, 110, 99, 109),
+            (110, 112, 109, 111),
+            (111, 111, 109, 110),
+        ]
+    )
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            partial_exit_enabled=True,
+            partial_exit_count=2,
+            partial_exit_rules=rules,
+            enable_take_profit=False,
+            stop_loss_pct=50.0,
+            time_stop_days=2,
+            time_stop_target_pct=-50.0,
+        ),
+    )
+    trade = require_trade(trade, reason)
+    assert [fill["exit_type"] for fill in trade["fills"]] == [
+        "fixed_tp",
+        "atr_trailing",
+    ]

@@ -32,6 +32,11 @@ SCAN_FIELD_CASTERS: dict[str, type[int] | type[float]] = {
     "candle_run_length": int,
     "candle_run_min_body_pct": float,
     "candle_run_total_move_pct": float,
+    "atr_filter_period": int,
+    "min_atr_filter_pct": float,
+    "max_atr_filter_pct": float,
+    "atr_trailing_period": int,
+    "atr_trailing_multiplier": float,
     "time_stop_days": int,
     "time_stop_target_pct": float,
     "stop_loss_pct": float,
@@ -46,6 +51,12 @@ SCAN_FIELD_CASTERS: dict[str, type[int] | type[float]] = {
     "partial_rule_1_ma_period": int,
     "partial_rule_2_ma_period": int,
     "partial_rule_3_ma_period": int,
+    "partial_rule_1_atr_period": int,
+    "partial_rule_2_atr_period": int,
+    "partial_rule_3_atr_period": int,
+    "partial_rule_1_atr_multiplier": float,
+    "partial_rule_2_atr_multiplier": float,
+    "partial_rule_3_atr_multiplier": float,
     "partial_rule_1_drawdown_pct": float,
     "partial_rule_2_drawdown_pct": float,
     "partial_rule_3_drawdown_pct": float,
@@ -61,6 +72,12 @@ PARTIAL_EXIT_SCAN_FIELDS = frozenset(
         "partial_rule_1_ma_period",
         "partial_rule_2_ma_period",
         "partial_rule_3_ma_period",
+        "partial_rule_1_atr_period",
+        "partial_rule_2_atr_period",
+        "partial_rule_3_atr_period",
+        "partial_rule_1_atr_multiplier",
+        "partial_rule_2_atr_multiplier",
+        "partial_rule_3_atr_multiplier",
         "partial_rule_1_drawdown_pct",
         "partial_rule_2_drawdown_pct",
         "partial_rule_3_drawdown_pct",
@@ -76,6 +93,12 @@ PARTIAL_EXIT_SCAN_FIELD_SPECS: dict[str, tuple[int, str, str]] = {
     "partial_rule_1_ma_period": (1, "ma_exit", "ma_period"),
     "partial_rule_2_ma_period": (2, "ma_exit", "ma_period"),
     "partial_rule_3_ma_period": (3, "ma_exit", "ma_period"),
+    "partial_rule_1_atr_period": (1, "atr_trailing", "atr_period"),
+    "partial_rule_2_atr_period": (2, "atr_trailing", "atr_period"),
+    "partial_rule_3_atr_period": (3, "atr_trailing", "atr_period"),
+    "partial_rule_1_atr_multiplier": (1, "atr_trailing", "atr_multiplier"),
+    "partial_rule_2_atr_multiplier": (2, "atr_trailing", "atr_multiplier"),
+    "partial_rule_3_atr_multiplier": (3, "atr_trailing", "atr_multiplier"),
     "partial_rule_1_drawdown_pct": (1, "profit_drawdown", "drawdown_pct"),
     "partial_rule_2_drawdown_pct": (2, "profit_drawdown", "drawdown_pct"),
     "partial_rule_3_drawdown_pct": (3, "profit_drawdown", "drawdown_pct"),
@@ -99,10 +122,15 @@ BASE_FACTOR_SCAN_FIELDS = frozenset(
     {
         "time_stop_days",
         "time_stop_target_pct",
+        "atr_filter_period",
+        "min_atr_filter_pct",
+        "max_atr_filter_pct",
         "stop_loss_pct",
         "take_profit_pct",
         "profit_drawdown_pct",
         "exit_ma_period",
+        "atr_trailing_period",
+        "atr_trailing_multiplier",
         "buy_slippage_pct",
         "sell_slippage_pct",
     }
@@ -165,6 +193,8 @@ class PartialExitRule:
     ma_period: int | None = None
     drawdown_pct: float | None = None
     min_profit_to_activate_drawdown: float | None = None
+    atr_period: int | None = None
+    atr_multiplier: float | None = None
 
     @property
     def weight_ratio(self) -> float:
@@ -261,6 +291,13 @@ class AnalysisParams:
     vcb_breakout_lookback: int = 20
     buy_slippage_pct: float = 0.0
     sell_slippage_pct: float = 0.0
+    enable_atr_trailing_exit: bool = False
+    atr_trailing_period: int = 14
+    atr_trailing_multiplier: float = 3.0
+    enable_atr_filter: bool = False
+    atr_filter_period: int = 14
+    min_atr_filter_pct: float = 0.0
+    max_atr_filter_pct: float = 100.0
     candle_run_length: int = 2
     candle_run_min_body_pct: float = 1.0
     candle_run_total_move_pct: float = 2.0
@@ -312,6 +349,10 @@ class AnalysisParams:
             lookback = max(lookback, max(self.fast_ma_period, self.slow_ma_period) + 5)
         if self.enable_ma_exit:
             lookback = max(lookback, self.exit_ma_period + 5)
+        if self.enable_atr_trailing_exit:
+            lookback = max(lookback, self.atr_trailing_period + 5)
+        if self.enable_atr_filter:
+            lookback = max(lookback, self.atr_filter_period + 5)
         if self.partial_exit_enabled:
             partial_ma_periods = [
                 rule.ma_period
@@ -320,6 +361,13 @@ class AnalysisParams:
             ]
             if partial_ma_periods:
                 lookback = max(lookback, max(partial_ma_periods) + 5)
+            partial_atr_periods = [
+                rule.atr_period
+                for rule in self.partial_exit_rules
+                if rule.enabled and rule.atr_period is not None
+            ]
+            if partial_atr_periods:
+                lookback = max(lookback, max(partial_atr_periods) + 5)
         if self.entry_factor == "trend_breakout":
             lookback = max(lookback, self.trend_breakout_lookback + 5)
         if self.entry_factor == "volatility_contraction_breakout":
@@ -524,7 +572,7 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
         if len(priorities) != len(set(priorities)):
             errors.append("启用分批止盈时，每批 priority 必须唯一。")
 
-        valid_modes = {"fixed_tp", "ma_exit", "profit_drawdown"}
+        valid_modes = {"fixed_tp", "ma_exit", "profit_drawdown", "atr_trailing"}
         for index, rule in enumerate(enabled_rules, start=1):
             if rule.mode not in valid_modes:
                 errors.append(f"第 {index} 批退出方式不合法。")
@@ -557,6 +605,17 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
                 ):
                     errors.append(f"第 {index} 批最小浮盈激活门槛不能为负数。")
 
+            if rule.mode == "atr_trailing":
+                if rule.atr_period is None:
+                    errors.append(f"第 {index} 批 atr_trailing 必须填写 ATR 周期。")
+                elif rule.atr_period < 1:
+                    errors.append(f"第 {index} 批 atr_trailing ATR 周期必须大于等于 1。")
+
+                if rule.atr_multiplier is None:
+                    errors.append(f"第 {index} 批 atr_trailing 必须填写 ATR 倍数。")
+                elif rule.atr_multiplier <= 0:
+                    errors.append(f"第 {index} 批 atr_trailing ATR 倍数必须大于 0。")
+
     if params.time_stop_days < 1:
         errors.append("启用时间退出时，time_stop_days 必须大于等于 1。")
 
@@ -568,6 +627,27 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.buy_slippage_pct < 0 or params.sell_slippage_pct < 0:
         errors.append("买入滑点和卖出滑点都不能为负数。")
+
+    if params.enable_atr_trailing_exit and params.atr_trailing_period < 1:
+        errors.append("ATR 跟踪周期必须大于等于 1。")
+
+    if params.enable_atr_trailing_exit and params.atr_trailing_multiplier <= 0:
+        errors.append("ATR 跟踪倍数必须大于 0。")
+
+    if params.enable_atr_filter and params.atr_filter_period < 1:
+        errors.append("ATR 过滤周期必须大于等于 1。")
+
+    if params.enable_atr_filter and params.min_atr_filter_pct < 0:
+        errors.append("最小 ATR 波动过滤不能为负数。")
+
+    if params.enable_atr_filter and params.max_atr_filter_pct < 0:
+        errors.append("最大 ATR 波动过滤不能为负数。")
+
+    if (
+        params.enable_atr_filter
+        and params.min_atr_filter_pct > params.max_atr_filter_pct
+    ):
+        errors.append("ATR 波动过滤下限不能大于上限。")
 
     if params.use_ma_filter:
         if params.fast_ma_period < 1 or params.slow_ma_period < 1:

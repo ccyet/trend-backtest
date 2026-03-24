@@ -46,6 +46,8 @@ class AppDisplayFormatterTest(unittest.TestCase):
                 "holding_days": [5.0],
                 "fill_count": [2.0],
                 "win_flag": [1.0],
+                "entry_reason": ["gap.strict_break.up"],
+                "exit_reason": ["atr_trailing: ATR 跟踪止盈触发"],
             }
         )
 
@@ -63,6 +65,8 @@ class AppDisplayFormatterTest(unittest.TestCase):
         self.assertEqual(record["持有天数"], "5")
         self.assertEqual(record["成交批次数"], "2")
         self.assertEqual(record["是否盈利"], "是")
+        self.assertEqual(record["开仓原因"], "gap.strict_break.up")
+        self.assertEqual(record["离场原因"], "atr_trailing: ATR 跟踪止盈触发")
 
     def test_other_display_formatters_compact_numeric_values(self) -> None:
         summary = pd.DataFrame(

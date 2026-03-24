@@ -154,6 +154,117 @@ def test_validation_rejects_gap_entry_mode_when_factor_is_not_gap() -> None:
     assert any("gap_entry_mode" in error for error in errors)
 
 
+def test_validation_accepts_atr_filter_and_whole_position_atr_exit() -> None:
+    params = make_params(
+        ParamScanConfig(enabled=False),
+        enable_atr_filter=True,
+        atr_filter_period=14,
+        min_atr_filter_pct=1.0,
+        max_atr_filter_pct=5.0,
+        enable_atr_trailing_exit=True,
+        atr_trailing_period=14,
+        atr_trailing_multiplier=2.5,
+    )
+    errors, _ = validate_params(params)
+    assert not errors
+
+
+def test_parameter_scan_validation_accepts_atr_filter_axis() -> None:
+    params = make_params(
+        ParamScanConfig(
+            enabled=True,
+            axes=(ParamScanAxis(field_name="atr_filter_period", values=(7, 14)),),
+            metric="total_return_pct",
+            max_combinations=25,
+        ),
+        enable_atr_filter=True,
+    )
+    errors, _ = validate_params(params)
+    assert not errors
+
+
+def test_parameter_scan_validation_accepts_atr_trailing_axis() -> None:
+    params = make_params(
+        ParamScanConfig(
+            enabled=True,
+            axes=(
+                ParamScanAxis(
+                    field_name="atr_trailing_multiplier", values=(2.0, 3.0)
+                ),
+            ),
+            metric="total_return_pct",
+            max_combinations=25,
+        ),
+        enable_atr_trailing_exit=True,
+    )
+    errors, _ = validate_params(params)
+    assert not errors
+
+
+def test_validation_accepts_partial_atr_trailing_rule() -> None:
+    params = make_params(
+        ParamScanConfig(enabled=False),
+        partial_exit_enabled=True,
+        partial_exit_count=2,
+        partial_exit_rules=(
+            PartialExitRule(True, 50.0, "atr_trailing", 1, atr_period=14, atr_multiplier=2.0),
+            PartialExitRule(True, 50.0, "fixed_tp", 2, target_profit_pct=4.0),
+        ),
+    )
+    errors, _ = validate_params(params)
+    assert not errors
+
+
+def test_parameter_scan_validation_accepts_partial_atr_trailing_axis() -> None:
+    params = make_params(
+        ParamScanConfig(
+            enabled=True,
+            axes=(ParamScanAxis(field_name="partial_rule_1_atr_period", values=(7, 14)),),
+            metric="total_return_pct",
+            max_combinations=25,
+        ),
+        partial_exit_enabled=True,
+        partial_exit_count=2,
+        partial_exit_rules=(
+            PartialExitRule(True, 50.0, "atr_trailing", 1, atr_period=10, atr_multiplier=2.0),
+            PartialExitRule(True, 50.0, "fixed_tp", 2, target_profit_pct=4.0),
+        ),
+    )
+    errors, _ = validate_params(params)
+    assert not errors
+
+
+def test_apply_scan_overrides_updates_atr_fields() -> None:
+    params = make_params(
+        ParamScanConfig(enabled=False),
+        enable_atr_filter=True,
+        atr_filter_period=14,
+        enable_atr_trailing_exit=True,
+        atr_trailing_period=14,
+        atr_trailing_multiplier=3.0,
+        partial_exit_enabled=True,
+        partial_exit_count=2,
+        partial_exit_rules=(
+            PartialExitRule(True, 50.0, "atr_trailing", 1, atr_period=10, atr_multiplier=2.0),
+            PartialExitRule(True, 50.0, "fixed_tp", 2, target_profit_pct=4.0),
+        ),
+    )
+    updated = apply_scan_overrides(
+        params,
+        {
+            "atr_filter_period": 21,
+            "atr_trailing_multiplier": 2.5,
+            "partial_rule_1_atr_period": 7,
+            "partial_rule_1_atr_multiplier": 1.5,
+        },
+    )
+
+    assert updated.atr_filter_period == 21
+    assert updated.atr_trailing_multiplier == 2.5
+    assert updated.partial_exit_rules[0].atr_period == 7
+    assert updated.partial_exit_rules[0].atr_multiplier == 1.5
+
+
 def test_required_lookback_days_considers_factor_lookback() -> None:
     params = make_params(
         ParamScanConfig(enabled=False),

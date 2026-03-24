@@ -145,6 +145,23 @@ def test_vcb_breakout_requires_contraction_gate() -> None:
     assert bool(result.loc[3, "is_contraction"])
 
 
+def test_atr_filter_blocks_signal_when_prior_atr_pct_is_below_minimum() -> None:
+    df = make_df([(100.0, 101.0, 99.0, 100.0, 1000), (104.0, 105.0, 103.0, 104.0, 1000)])
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="gap",
+            enable_atr_filter=True,
+            atr_filter_period=1,
+            min_atr_filter_pct=2.5,
+            max_atr_filter_pct=5.0,
+        ),
+    )
+
+    assert float(result.loc[1, "atr_filter_pct"]) == 2.0
+    assert not bool(result.loc[1, "is_signal"])
+
+
 def test_trend_breakout_long_open_fill_uses_open_price() -> None:
     df = make_df(
         [

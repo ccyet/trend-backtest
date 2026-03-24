@@ -58,6 +58,61 @@ def _compute_breakout_trigger_price(
     )
 
 
+def _compute_true_range(stock_df: pd.DataFrame) -> pd.Series:
+    high_series = _column(stock_df, "high")
+    low_series = _column(stock_df, "low")
+    prev_close = _column(stock_df, "close").shift(1)
+    tr_components = pd.concat(
+        [
+            high_series - low_series,
+            (high_series - prev_close).abs(),
+            (low_series - prev_close).abs(),
+        ],
+        axis=1,
+    )
+    return pd.Series(tr_components.max(axis=1), index=stock_df.index)
+
+
+def _compute_atr_series(stock_df: pd.DataFrame, period: int) -> pd.Series:
+    return pd.Series(
+        _compute_true_range(stock_df).rolling(period).mean(), index=stock_df.index
+    )
+
+
+def _build_entry_reason(params: AnalysisParams, entry_factor: str) -> str:
+    direction_text = "up" if params.gap_direction == "up" else "down"
+    if entry_factor == "gap":
+        return f"gap.{params.gap_entry_mode}.{direction_text}"
+    return f"{entry_factor}.{direction_text}"
+
+
+def _atr_trailing_stop_price(
+    reference_price: float,
+    atr_value: float | None,
+    atr_multiplier: float | None,
+    direction: str,
+) -> float | None:
+    if atr_value is None or atr_multiplier is None or pd.isna(atr_value):
+        return None
+    if direction == "short":
+        return reference_price + float(atr_value) * float(atr_multiplier)
+    return reference_price - float(atr_value) * float(atr_multiplier)
+
+
+def _exit_reason_label(exit_type: str) -> str:
+    labels = {
+        "stop_loss": "stop_loss: 全仓止损触发",
+        "take_profit": "take_profit: 固定止盈触发",
+        "profit_drawdown": "profit_drawdown: 分批利润回撤触发",
+        "profit_drawdown_exit": "profit_drawdown_exit: 整笔利润回撤触发",
+        "ma_exit": "ma_exit: 均线离场触发",
+        "atr_trailing": "atr_trailing: ATR 跟踪止盈触发",
+        "time_exit": "time_exit: 时间退出触发",
+        "force_close": "force_close: 数据结束强制平仓",
+    }
+    return labels.get(exit_type, exit_type)
+
+
 def _compute_candle_run_body_pct(
     stock_df: pd.DataFrame, direction: str
 ) -> tuple[pd.Series, pd.Series]:
@@ -195,6 +250,8 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
     stock_df["entry_factor"] = params.entry_factor
     stock_df["entry_trigger_price"] = math.nan
     stock_df["is_contraction"] = False
+    stock_df["atr_filter_value"] = math.nan
+    stock_df["atr_filter_pct"] = math.nan
 
     signal_mask = (
         stock_df["prev_close"].notna()
@@ -262,6 +319,17 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
                 signal_mask &= stock_df["open"] > stock_df["fast_ma"]
                 signal_mask &= stock_df["open"] > stock_df["slow_ma"]
 
+    if params.enable_atr_filter:
+        stock_df["atr_filter_value"] = _compute_atr_series(
+            stock_df, params.atr_filter_period
+        ).shift(1)
+        stock_df["atr_filter_pct"] = (
+            stock_df["atr_filter_value"] / stock_df["prev_close"]
+        ) * 100.0
+        signal_mask &= stock_df["atr_filter_pct"].notna()
+        signal_mask &= stock_df["atr_filter_pct"] >= params.min_atr_filter_pct
+        signal_mask &= stock_df["atr_filter_pct"] <= params.max_atr_filter_pct
+
     stock_df["is_signal"] = signal_mask
     return stock_df
 
@@ -277,6 +345,20 @@ def _build_partial_ma_series(
     close_series = _column(stock_df, "close")
     return {
         period: pd.Series(close_series.rolling(period).mean(), index=stock_df.index)
+        for period in periods
+    }
+
+
+def _build_partial_atr_series(
+    stock_df: pd.DataFrame, rules: list[PartialExitRule]
+) -> dict[int, pd.Series]:
+    periods = {
+        int(rule.atr_period)
+        for rule in rules
+        if rule.mode == "atr_trailing" and rule.atr_period is not None
+    }
+    return {
+        period: cast(pd.Series, _compute_atr_series(stock_df, period).shift(1))
         for period in periods
     }
 
@@ -355,6 +437,7 @@ def _rule_triggered(
     direction: str,
     peak_total_profit_ratio: float,
     current_total_profit_ratio: float,
+    trailing_stop_price: float | None = None,
 ) -> bool:
     day_close = _float_scalar(day_row["close"])
     day_high = _float_scalar(day_row["high"])
@@ -396,6 +479,15 @@ def _rule_triggered(
         if pd.isna(profit_drawdown):
             return False
         return profit_drawdown >= rule.drawdown_ratio
+
+    if rule.mode == "atr_trailing":
+        if trailing_stop_price is None:
+            return False
+        return (
+            day_high >= trailing_stop_price
+            if direction == "short"
+            else day_low <= trailing_stop_price
+        )
 
     return False
 
@@ -444,6 +536,11 @@ def simulate_trade(
         if params.enable_ma_exit
         else None
     )
+    atr_trailing_series = (
+        _compute_atr_series(stock_df, params.atr_trailing_period).shift(1)
+        if params.enable_atr_trailing_exit
+        else None
+    )
 
     fills: list[TradeFill] = []
     remaining_weight = 1.0
@@ -462,10 +559,16 @@ def simulate_trade(
     partial_ma_series = (
         _build_partial_ma_series(stock_df, partial_rules) if partial_rules else {}
     )
+    partial_atr_series = (
+        _build_partial_atr_series(stock_df, partial_rules) if partial_rules else {}
+    )
     triggered_rule_priority: set[int] = set()
 
     triggered_profit_drawdown_ratio = math.nan
     triggered_exit_ma_value = math.nan
+    trailing_reference_price = (
+        float(signal_row["low"]) if direction == "short" else float(signal_row["high"])
+    )
 
     for holding_days in range(1, max_holding_days + 1):
         day_idx = signal_idx + holding_days
@@ -515,6 +618,20 @@ def simulate_trade(
                     day_close,
                     direction,
                 )
+                trailing_stop_price: float | None = None
+                if rule.mode == "atr_trailing" and rule.atr_period is not None:
+                    atr_series = partial_atr_series.get(int(rule.atr_period))
+                    atr_value = (
+                        None
+                        if atr_series is None or pd.isna(atr_series.iloc[day_idx])
+                        else float(atr_series.iloc[day_idx])
+                    )
+                    trailing_stop_price = _atr_trailing_stop_price(
+                        trailing_reference_price,
+                        atr_value,
+                        rule.atr_multiplier,
+                        direction,
+                    )
                 if not _rule_triggered(
                     rule,
                     day_row,
@@ -524,6 +641,7 @@ def simulate_trade(
                     direction,
                     current_peak_total_profit_ratio,
                     current_total_profit_ratio,
+                    trailing_stop_price=trailing_stop_price,
                 ):
                     continue
 
@@ -549,6 +667,11 @@ def simulate_trade(
                 if rule.mode == "profit_drawdown":
                     triggered_profit_drawdown_ratio = _compute_profit_drawdown_ratio(
                         current_peak_total_profit_ratio, current_total_profit_ratio
+                    )
+                if rule.mode == "atr_trailing" and trailing_stop_price is not None:
+                    reference_fill_price = trailing_stop_price
+                    fill_price = _apply_exit_slippage(
+                        trailing_stop_price, params, direction
                     )
 
                 fills.append(
@@ -587,23 +710,6 @@ def simulate_trade(
 
         # 3) 旧版整笔退出
         if (not params.partial_exit_enabled) and remaining_weight > EPSILON:
-            tp_hit = (
-                day_low <= take_profit_price
-                if direction == "short"
-                else day_high >= take_profit_price
-            )
-            if params.enable_take_profit and tp_hit:
-                fills.append(
-                    TradeFill(
-                        str(day_date.date()),
-                        _apply_exit_slippage(take_profit_price, params, direction),
-                        remaining_weight,
-                        "take_profit",
-                        holding_days,
-                    )
-                )
-                remaining_weight = 0.0
-
             if remaining_weight > EPSILON and params.enable_profit_drawdown_exit:
                 current_total_profit_ratio = _total_trade_profit_ratio(
                     realized_trigger_profit_ratio,
@@ -657,6 +763,57 @@ def simulate_trade(
                         triggered_exit_ma_value = float(day_exit_ma)
                         remaining_weight = 0.0
 
+            if (
+                remaining_weight > EPSILON
+                and params.enable_atr_trailing_exit
+                and atr_trailing_series is not None
+            ):
+                atr_value = atr_trailing_series.iloc[day_idx]
+                trailing_stop_price = _atr_trailing_stop_price(
+                    trailing_reference_price,
+                    None if pd.isna(atr_value) else float(atr_value),
+                    params.atr_trailing_multiplier,
+                    direction,
+                )
+                atr_hit = (
+                    trailing_stop_price is not None
+                    and (
+                        day_high >= trailing_stop_price
+                        if direction == "short"
+                        else day_low <= trailing_stop_price
+                    )
+                )
+                if atr_hit and trailing_stop_price is not None:
+                    fills.append(
+                        TradeFill(
+                            str(day_date.date()),
+                            _apply_exit_slippage(
+                                trailing_stop_price, params, direction
+                            ),
+                            remaining_weight,
+                            "atr_trailing",
+                            holding_days,
+                        )
+                    )
+                    remaining_weight = 0.0
+
+            tp_hit = (
+                day_low <= take_profit_price
+                if direction == "short"
+                else day_high >= take_profit_price
+            )
+            if remaining_weight > EPSILON and params.enable_take_profit and tp_hit:
+                fills.append(
+                    TradeFill(
+                        str(day_date.date()),
+                        _apply_exit_slippage(take_profit_price, params, direction),
+                        remaining_weight,
+                        "take_profit",
+                        holding_days,
+                    )
+                )
+                remaining_weight = 0.0
+
         # 4) 时间退出
         if remaining_weight > EPSILON and holding_days >= params.time_stop_days:
             holding_return = (
@@ -679,6 +836,12 @@ def simulate_trade(
         if remaining_weight <= EPSILON:
             remaining_weight = 0.0
             break
+
+        trailing_reference_price = (
+            min(trailing_reference_price, favorable_price)
+            if direction == "short"
+            else max(trailing_reference_price, favorable_price)
+        )
 
     # 5) 数据结束处理
     if remaining_weight > EPSILON:
@@ -711,6 +874,9 @@ def simulate_trade(
 
     weighted_sell_price = (
         sum(fill["sell_price"] * fill["weight"] for fill in fill_dicts) / total_weight
+    )
+    exit_reason = "+".join(
+        _exit_reason_label(str(fill["exit_type"])) for fill in fill_dicts
     )
     sell_date = pd.to_datetime(fill_dicts[-1]["sell_date"]).date()
     exit_type = "+".join(fill["exit_type"] for fill in fill_dicts)
@@ -772,8 +938,10 @@ def simulate_trade(
         if pd.notna(triggered_profit_drawdown_ratio)
         else math.nan,
         "entry_factor": entry_factor,
+        "entry_reason": _build_entry_reason(params, entry_factor),
         "entry_trigger_price": float(entry_trigger_price)
         if pd.notna(entry_trigger_price)
         else math.nan,
         "entry_fill_type": entry_fill_type,
+        "exit_reason": exit_reason,
     }, None
