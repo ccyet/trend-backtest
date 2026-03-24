@@ -87,12 +87,17 @@ SCAN_FIELD_LABELS = {
     "candle_run_length": "连续K线根数",
     "candle_run_min_body_pct": "单根最小实体幅度",
     "candle_run_total_move_pct": "组合最小累计涨跌幅",
+    "atr_filter_period": "ATR过滤周期",
+    "min_atr_filter_pct": "最小ATR波动过滤",
+    "max_atr_filter_pct": "最大ATR波动过滤",
     "time_stop_days": "最多持有天数",
     "time_stop_target_pct": "时间退出收益阈值",
     "stop_loss_pct": "全仓止损",
     "take_profit_pct": "固定止盈",
     "profit_drawdown_pct": "盈利回撤",
     "exit_ma_period": "离场均线周期",
+    "atr_trailing_period": "ATR跟踪周期",
+    "atr_trailing_multiplier": "ATR跟踪倍数",
     "buy_slippage_pct": "买入滑点",
     "sell_slippage_pct": "卖出滑点",
     "partial_rule_1_target_profit_pct": "第1批目标收益",
@@ -101,6 +106,12 @@ SCAN_FIELD_LABELS = {
     "partial_rule_1_ma_period": "第1批均线周期",
     "partial_rule_2_ma_period": "第2批均线周期",
     "partial_rule_3_ma_period": "第3批均线周期",
+    "partial_rule_1_atr_period": "第1批ATR周期",
+    "partial_rule_2_atr_period": "第2批ATR周期",
+    "partial_rule_3_atr_period": "第3批ATR周期",
+    "partial_rule_1_atr_multiplier": "第1批ATR倍数",
+    "partial_rule_2_atr_multiplier": "第2批ATR倍数",
+    "partial_rule_3_atr_multiplier": "第3批ATR倍数",
     "partial_rule_1_drawdown_pct": "第1批回撤比例",
     "partial_rule_2_drawdown_pct": "第2批回撤比例",
     "partial_rule_3_drawdown_pct": "第3批回撤比例",
@@ -146,6 +157,8 @@ DETAIL_COLUMN_LABELS = {
     "profit_drawdown_ratio": "利润回撤比例",
     "fill_count": "成交批次数",
     "fill_detail_json": "成交明细",
+    "entry_reason": "开仓原因",
+    "exit_reason": "离场原因",
     "nav_before_trade": "交易前净值",
     "nav_after_trade": "交易后净值",
 }
@@ -167,6 +180,7 @@ PARTIAL_EXIT_MODE_LABELS = {
     "fixed_tp": "固定止盈",
     "ma_exit": "均线离场",
     "profit_drawdown": "利润回撤",
+    "atr_trailing": "ATR 跟踪止盈",
 }
 BACKTEST_RANGE_PRESETS = (
     ("10年至今", 10),
@@ -209,6 +223,11 @@ FACTOR_CONTROL_DEFAULTS: dict[str, str | int | float] = {
     "candle_run_length": 2,
     "candle_run_min_body_pct": 1.0,
     "candle_run_total_move_pct": 2.0,
+    "atr_filter_period": 14,
+    "min_atr_filter_pct": 0.0,
+    "max_atr_filter_pct": 100.0,
+    "atr_trailing_period": 14,
+    "atr_trailing_multiplier": 3.0,
 }
 SCAN_AXIS_STATE_KEYS = (
     ("scan_axis_1_field", "scan_axis_1_values"),
@@ -779,12 +798,17 @@ def format_scan_for_display(scan_df: pd.DataFrame) -> pd.DataFrame:
             "candle_run_length",
             "candle_run_min_body_pct",
             "candle_run_total_move_pct",
+            "atr_filter_period",
+            "min_atr_filter_pct",
+            "max_atr_filter_pct",
             "time_stop_days",
             "time_stop_target_pct",
             "stop_loss_pct",
             "take_profit_pct",
             "profit_drawdown_pct",
             "exit_ma_period",
+            "atr_trailing_period",
+            "atr_trailing_multiplier",
             "buy_slippage_pct",
             "sell_slippage_pct",
             "partial_rule_1_target_profit_pct",
@@ -793,6 +817,12 @@ def format_scan_for_display(scan_df: pd.DataFrame) -> pd.DataFrame:
             "partial_rule_1_ma_period",
             "partial_rule_2_ma_period",
             "partial_rule_3_ma_period",
+            "partial_rule_1_atr_period",
+            "partial_rule_2_atr_period",
+            "partial_rule_3_atr_period",
+            "partial_rule_1_atr_multiplier",
+            "partial_rule_2_atr_multiplier",
+            "partial_rule_3_atr_multiplier",
             "partial_rule_1_drawdown_pct",
             "partial_rule_2_drawdown_pct",
             "partial_rule_3_drawdown_pct",
@@ -918,6 +948,8 @@ def build_detail_column_config() -> dict[str, object]:
     return {
         "信号日期": st.column_config.TextColumn("信号日期", width="small"),
         "股票代码": st.column_config.TextColumn("股票代码", width="small"),
+        "开仓原因": st.column_config.TextColumn("开仓原因", width="medium"),
+        "离场原因": st.column_config.TextColumn("离场原因", width="medium"),
         "相对昨收跳空幅度": st.column_config.TextColumn(
             "相对昨收跳空幅度", width="small"
         ),
@@ -950,12 +982,17 @@ def build_scan_column_config() -> dict[str, object]:
             "波动收缩突破回看天数", width="small"
         ),
         "连续K线根数": st.column_config.TextColumn("连续K线根数", width="small"),
+        "ATR过滤周期": st.column_config.TextColumn("ATR过滤周期", width="small"),
+        "最小ATR波动过滤": st.column_config.TextColumn("最小ATR波动过滤", width="small"),
+        "最大ATR波动过滤": st.column_config.TextColumn("最大ATR波动过滤", width="small"),
         "单根最小实体幅度": st.column_config.TextColumn(
             "单根最小实体幅度", width="small"
         ),
         "组合最小累计涨跌幅": st.column_config.TextColumn(
             "组合最小累计涨跌幅", width="small"
         ),
+        "ATR跟踪周期": st.column_config.TextColumn("ATR跟踪周期", width="small"),
+        "ATR跟踪倍数": st.column_config.TextColumn("ATR跟踪倍数", width="small"),
         "最多持有天数": st.column_config.TextColumn("最多持有天数", width="small"),
         "策略胜率": st.column_config.TextColumn("策略胜率", width="small"),
         "总收益率": st.column_config.TextColumn("总收益率", width="small"),
@@ -1407,10 +1444,33 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
         slow_ma_period = ma_filter_cols[1].number_input(
             "慢线周期", min_value=1, value=20, step=1, disabled=not use_ma_filter
         )
+        enable_atr_filter = st.checkbox("启用 ATR 波动率过滤", value=False)
+        atr_filter_cols = st.columns(3)
+        atr_filter_period = atr_filter_cols[0].number_input(
+            "ATR 过滤周期",
+            min_value=1,
+            value=int(factor_control_default("atr_filter_period")),
+            step=1,
+            disabled=not enable_atr_filter,
+        )
+        min_atr_filter_pct = atr_filter_cols[1].number_input(
+            "最小 ATR 波动（%）",
+            min_value=0.0,
+            value=float(factor_control_default("min_atr_filter_pct")),
+            step=0.1,
+            disabled=not enable_atr_filter,
+        )
+        max_atr_filter_pct = atr_filter_cols[2].number_input(
+            "最大 ATR 波动（%）",
+            min_value=0.0,
+            value=float(factor_control_default("max_atr_filter_pct")),
+            step=0.1,
+            disabled=not enable_atr_filter,
+        )
 
     with core_exit_col:
         st.markdown("**退出与风控**")
-        st.caption("整笔退出保留在这里，分批止盈放到下方进阶设置。")
+        st.caption("整笔退出保留在这里，ATR 跟踪与其他整笔退出并列；固定止盈放在次级入口。")
         use_time_stop = st.checkbox("启用时间退出", value=True, key="use_time_stop")
         time_stop_cols = st.columns(2)
         time_stop_days = time_stop_cols[0].number_input(
@@ -1427,15 +1487,6 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
         stop_loss_pct = exit_mode_cols[1].number_input(
             "全仓止损（%）", min_value=0.0, value=3.0, step=0.1
         )
-        take_profit_cols = st.columns(2)
-        enable_take_profit = take_profit_cols[0].checkbox("启用固定止盈", value=True)
-        take_profit_pct = take_profit_cols[1].number_input(
-            "固定止盈（%）",
-            min_value=0.0,
-            value=5.0,
-            step=0.1,
-            disabled=not enable_take_profit,
-        )
         drawdown_cols = st.columns(2)
         enable_profit_drawdown_exit = drawdown_cols[0].checkbox(
             "启用盈利回撤止盈（整笔）", value=False
@@ -1451,6 +1502,33 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
         enable_ma_exit = ma_exit_cols[0].checkbox("启用均线离场（整笔）", value=False)
         exit_ma_period = ma_exit_cols[1].number_input(
             "离场均线周期", min_value=1, value=10, step=1, disabled=not enable_ma_exit
+        )
+        atr_exit_cols = st.columns(3)
+        enable_atr_trailing_exit = atr_exit_cols[0].checkbox(
+            "启用 ATR 跟踪止盈（整笔）", value=False
+        )
+        atr_trailing_period = atr_exit_cols[1].number_input(
+            "ATR 跟踪周期",
+            min_value=1,
+            value=int(factor_control_default("atr_trailing_period")),
+            step=1,
+            disabled=not enable_atr_trailing_exit,
+        )
+        atr_trailing_multiplier = atr_exit_cols[2].number_input(
+            "ATR 倍数",
+            min_value=0.1,
+            value=float(factor_control_default("atr_trailing_multiplier")),
+            step=0.1,
+            disabled=not enable_atr_trailing_exit,
+        )
+        take_profit_cols = st.columns(2)
+        enable_take_profit = take_profit_cols[0].checkbox("启用固定止盈（次级）", value=True)
+        take_profit_pct = take_profit_cols[1].number_input(
+            "固定止盈（%）",
+            min_value=0.0,
+            value=5.0,
+            step=0.1,
+            disabled=not enable_take_profit,
         )
         ma_exit_batches = st.number_input(
             "均线离场分批数",
@@ -1529,8 +1607,8 @@ with advanced_cols[0]:
                 )
                 mode = c2.selectbox(
                     f"退出方式（第{i}批）",
-                    options=["fixed_tp", "ma_exit", "profit_drawdown"],
-                    index=["fixed_tp", "ma_exit", "profit_drawdown"].index(
+                    options=["fixed_tp", "ma_exit", "profit_drawdown", "atr_trailing"],
+                    index=["fixed_tp", "ma_exit", "profit_drawdown", "atr_trailing"].index(
                         mode_default
                     ),
                     format_func=lambda value: str(
@@ -1570,6 +1648,22 @@ with advanced_cols[0]:
                     disabled=(not partial_exit_enabled) or mode != "profit_drawdown",
                     key=f"p_mpa_{i}",
                 )
+                atr_period = c3.number_input(
+                    f"ATR 周期（第{i}批）",
+                    min_value=1,
+                    value=14,
+                    step=1,
+                    disabled=(not partial_exit_enabled) or mode != "atr_trailing",
+                    key=f"p_atr_period_{i}",
+                )
+                atr_multiplier = c2.number_input(
+                    f"ATR 倍数（第{i}批）",
+                    min_value=0.1,
+                    value=3.0,
+                    step=0.1,
+                    disabled=(not partial_exit_enabled) or mode != "atr_trailing",
+                    key=f"p_atr_multiplier_{i}",
+                )
                 partial_rule_inputs.append(
                     {
                         "enabled": bool(partial_exit_enabled),
@@ -1583,6 +1677,10 @@ with advanced_cols[0]:
                         else None,
                         "min_profit_to_activate_drawdown": float(mpa)
                         if mode == "profit_drawdown"
+                        else None,
+                        "atr_period": int(atr_period) if mode == "atr_trailing" else None,
+                        "atr_multiplier": float(atr_multiplier)
+                        if mode == "atr_trailing"
                         else None,
                     }
                 )
@@ -1728,6 +1826,10 @@ if submitted:
         use_ma_filter=bool(use_ma_filter),
         fast_ma_period=int(fast_ma_period),
         slow_ma_period=int(slow_ma_period),
+        enable_atr_filter=bool(enable_atr_filter),
+        atr_filter_period=int(atr_filter_period),
+        min_atr_filter_pct=float(min_atr_filter_pct),
+        max_atr_filter_pct=float(max_atr_filter_pct),
         time_stop_days=int(time_stop_days),
         time_stop_target_pct=float(time_stop_target_pct),
         stop_loss_pct=float(stop_loss_pct),
@@ -1737,6 +1839,9 @@ if submitted:
         profit_drawdown_pct=float(profit_drawdown_pct),
         enable_ma_exit=bool(enable_ma_exit),
         exit_ma_period=int(exit_ma_period),
+        enable_atr_trailing_exit=bool(enable_atr_trailing_exit),
+        atr_trailing_period=int(atr_trailing_period),
+        atr_trailing_multiplier=float(atr_trailing_multiplier),
         ma_exit_batches=int(ma_exit_batches),
         partial_exit_enabled=bool(partial_exit_enabled),
         partial_exit_count=int(partial_exit_count),
@@ -1854,6 +1959,13 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
         c2.metric("胜率", f"{float(stats.get('strategy_win_rate_pct', 0.0)):.2f}%")
         c3.metric("最大回撤", f"{float(stats.get('max_drawdown_pct', 0.0)):.2f}%")
         c4.metric("交易笔数", f"{int(stats.get('executed_trades', len(detail_df)))}")
+        skip_metric_cols = st.columns(2)
+        skip_metric_cols[0].metric(
+            "开仓未成交跳过", f"{int(stats.get('skipped_entry_not_filled', 0))}"
+        )
+        skip_metric_cols[1].metric(
+            "持仓重叠跳过", f"{int(stats.get('skipped_overlapping_position', 0))}"
+        )
         if best_scan_overrides:
             summary_text = ", ".join(
                 f"{SCAN_FIELD_LABELS.get(field_name, field_name) or field_name}={value}"

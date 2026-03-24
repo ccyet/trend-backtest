@@ -68,6 +68,26 @@ def test_app_exposes_candle_run_specific_controls_and_scan_fields() -> None:
     assert "组合最小累计涨跌幅" in scan_axis_2.options
 
 
+def test_app_exposes_atr_filter_and_trailing_controls() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    checkbox_labels = [widget.label for widget in app.checkbox]
+    number_input_labels = [widget.label for widget in app.number_input]
+
+    assert "启用 ATR 波动率过滤" in checkbox_labels
+    assert "启用 ATR 跟踪止盈（整笔）" in checkbox_labels
+    assert "ATR 过滤周期" in number_input_labels
+    assert "ATR 跟踪周期" in number_input_labels
+    assert "ATR 倍数" in number_input_labels
+
+    scan_axis_1 = app.selectbox(key="scan_axis_1_field")
+    scan_axis_2 = app.selectbox(key="scan_axis_2_field")
+    for option in ["ATR过滤周期", "最小ATR波动过滤", "最大ATR波动过滤", "ATR跟踪周期", "ATR跟踪倍数"]:
+        assert option in scan_axis_1.options
+        assert option in scan_axis_2.options
+
+
 def test_app_preserves_candle_run_length_above_two() -> None:
     app = AppTest.from_file("app.py", default_timeout=10)
     app.run()
