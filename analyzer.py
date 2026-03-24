@@ -38,8 +38,10 @@ BASE_DETAIL_COLUMNS = [
     "fill_count",
     "fill_detail_json",
     "entry_factor",
+    "entry_reason",
     "entry_trigger_price",
     "entry_fill_type",
+    "exit_reason",
 ]
 
 DETAIL_COLUMNS = BASE_DETAIL_COLUMNS + [

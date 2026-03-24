@@ -117,8 +117,10 @@ def _build_trade(
         "exit_ma_value": float("nan"),
         "profit_drawdown_ratio": float("nan"),
         "entry_factor": "trend_breakout",
+        "entry_reason": "trend_breakout.up",
         "entry_trigger_price": buy_price,
         "entry_fill_type": fill_type,
+        "exit_reason": "force_close: 数据结束强制平仓",
     }
 
 
@@ -177,8 +179,10 @@ def test_scan_trade_candidates_propagates_skip_counters_and_entry_fields(
     assert stats["skipped_locked_bar_unfillable"] == 1
 
     assert "entry_factor" in detail_df.columns
+    assert "entry_reason" in detail_df.columns
     assert "entry_trigger_price" in detail_df.columns
     assert "entry_fill_type" in detail_df.columns
+    assert "exit_reason" in detail_df.columns
     assert set(detail_df["entry_factor"]) == {"trend_breakout"}
     assert set(detail_df["entry_fill_type"]) == {"open", "trigger"}
 
