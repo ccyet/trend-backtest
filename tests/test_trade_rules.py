@@ -400,8 +400,8 @@ def test_partial_case_l_drawdown_uses_updated_trailing_peak():
     )
     trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "profit_drawdown"
-    assert trade["fills"][-1]["holding_days"] == 3
-    assert trade["fills"][-1]["sell_price"] == 116
+    assert trade["fills"][-1]["holding_days"] == 2
+    assert trade["fills"][-1]["sell_price"] == 108
 
 
 def test_short_stop_loss_mirror():
@@ -605,7 +605,7 @@ def test_partial_total_profit_drawdown_uses_locked_first_batch_profit():
         "profit_drawdown",
     ]
     assert abs(trade["fills"][0]["sell_price"] - 110.0) < 1e-12
-    assert trade["fills"][1]["sell_price"] == 100.0
+    assert abs(trade["fills"][1]["sell_price"] - 101.0) < 1e-12
 
 
 def test_total_profit_drawdown_can_trigger_when_peak_price_drawdown_would_not():
@@ -643,7 +643,84 @@ def test_total_profit_drawdown_can_trigger_when_peak_price_drawdown_would_not():
     trade = require_trade(trade, reason)
     assert trade["fills"][-1]["exit_type"] == "profit_drawdown"
     assert trade["fills"][-1]["holding_days"] == 2
-    assert trade["fills"][-1]["sell_price"] == 135.0
+    assert trade["fills"][-1]["sell_price"] == 140.0
+
+
+def test_partial_profit_drawdown_open_fill_uses_prior_trigger_price_for_long():
+    rules = (
+        PartialExitRule(
+            True,
+            100,
+            "profit_drawdown",
+            1,
+            drawdown_pct=20.0,
+            min_profit_to_activate_drawdown=5.0,
+        ),
+        PartialExitRule(False, 0, "fixed_tp", 2, target_profit_pct=1.0),
+    )
+    df = make_stock_df(
+        [
+            (100, 101, 99, 100),
+            (100, 120, 100, 120),
+            (114, 115, 110, 112),
+        ]
+    )
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            partial_exit_enabled=True,
+            partial_exit_count=2,
+            partial_exit_rules=rules,
+            enable_take_profit=False,
+            stop_loss_pct=50.0,
+            time_stop_days=2,
+            time_stop_target_pct=-50.0,
+        ),
+    )
+    trade = require_trade(trade, reason)
+    assert trade["fills"][-1]["exit_type"] == "profit_drawdown"
+    assert trade["fills"][-1]["holding_days"] == 2
+    assert trade["fills"][-1]["sell_price"] == 114.0
+
+
+def test_partial_profit_drawdown_open_fill_uses_prior_trigger_price_for_short():
+    rules = (
+        PartialExitRule(
+            True,
+            100,
+            "profit_drawdown",
+            1,
+            drawdown_pct=20.0,
+            min_profit_to_activate_drawdown=5.0,
+        ),
+        PartialExitRule(False, 0, "fixed_tp", 2, target_profit_pct=1.0),
+    )
+    df = make_stock_df(
+        [
+            (100, 101, 99, 100),
+            (100, 100, 80, 80),
+            (86, 90, 85, 88),
+        ]
+    )
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            partial_exit_enabled=True,
+            partial_exit_count=2,
+            partial_exit_rules=rules,
+            enable_take_profit=False,
+            stop_loss_pct=50.0,
+            time_stop_days=2,
+            time_stop_target_pct=-50.0,
+        ),
+        direction="short",
+    )
+    trade = require_trade(trade, reason)
+    assert trade["fills"][-1]["exit_type"] == "profit_drawdown"
+    assert trade["fills"][-1]["holding_days"] == 2
+    assert trade["fills"][-1]["sell_price"] == 86.0
 
 
 def test_total_profit_drawdown_activation_uses_total_trade_peak_profit():

@@ -453,7 +453,7 @@ def render_trading_guide_page() -> None:
         """
         <div class='app-hero'>
             <h1>交易配置说明</h1>
-            <p>按“先数据、后信号、再退出与扫描”的顺序阅读，能最快完成一次有效回测配置。</p>
+            <p>如果你是第一次用，照着“先选数据 → 再选买点 → 再设卖点 → 最后看结果”的顺序配，最不容易出错。</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -461,26 +461,46 @@ def render_trading_guide_page() -> None:
     st.markdown(
         """
         <div class='guide-card'>
-            <h3>1. 回测范围与数据源</h3>
-            <p>先在侧边栏确定股票池、回测开始/结束日期和数据源。留空股票池表示全市场；优先推荐使用本地 Parquet 离线数据源，回放更稳定。周期当前默认执行 1d，30m / 15m 已预留插座，后续可接入相应数据目录。</p>
+            <h3>1. 先把回测范围定清楚</h3>
+            <p>先决定“看哪些股票、看多长时间、用哪份数据”。股票池留空就是全市场；时间拉得越长，回测越慢。数据源优先推荐本地 Parquet，因为速度和稳定性都更好。当前真正参与回测的是 <b>1d 日线</b>，30m / 15m 现在只是预留入口，暂时不是实盘可用状态。</p>
         </div>
         <div class='guide-card'>
-            <h3>2. 五类入场因子</h3>
+            <h3>2. 入场因子可以直接理解成“什么时候开仓”</h3>
             <ul>
-                <li><b>跳空</b>：研究开盘相对前一日价格的跳空幅度，方向使用“向上跳空 / 向下跳空”。</li>
-                <li><b>趋势突破</b>：研究价格突破过去窗口高点或低点，方向使用“向上突破 / 向下突破”。</li>
-                <li><b>波动收缩突破</b>：先识别波动收缩，再判断后续向上或向下突破。</li>
-                <li><b>连续K线追势</b>：基于前序连续阳线 / 连续阴线组合，在下一根K线开盘追涨或追空。</li>
-                <li><b>连续K线加速追势</b>：在连续K线追势基础上，额外要求实体强度逐步增强。</li>
+                <li><b>跳空</b>：适合看“今天一开盘就明显高开 / 低开”的机会。</li>
+                <li><b>趋势突破</b>：适合看“价格冲过过去 N 天最高点 / 跌破过去 N 天最低点”的机会。</li>
+                <li><b>波动收缩突破</b>：先找“前面波动越来越小”，再等后面放量突破，适合做蓄势后的发力段。</li>
+                <li><b>连续K线追势</b>：前面已经连续上涨 / 下跌几根，下一根开盘顺着方向追进去。</li>
+                <li><b>连续K线加速追势</b>：和上面类似，但要求走势不是普通连涨连跌，而是越来越强。</li>
             </ul>
+            <p>简单选法：想抓 <b>开盘异动</b> 就先试跳空；想抓 <b>突破新高/新低</b> 就试趋势突破；想抓 <b>整理后突然启动</b> 就试波动收缩突破。</p>
         </div>
         <div class='guide-card'>
-            <h3>3. 退出与风控</h3>
-            <p>核心区先设时间退出、止损、固定止盈等整笔规则；如果需要拆分仓位管理，再打开“分批止盈高级配置”，按优先级设置每一批的退出方式。</p>
+            <h3>3. 卖点和风控，先用最容易理解的几个</h3>
+            <ul>
+                <li><b>全仓止损</b>：做错了最多亏多少，先把底线定住。</li>
+                <li><b>时间退出</b>：拿到第 N 天还没走出你想要的表现，就按规则结束，不一直死扛。</li>
+                <li><b>固定止盈</b>：涨到 / 跌到你设的目标价就走，最直观。</li>
+                <li><b>均线离场</b>：走势转弱 / 转强到某条均线另一侧时离场。</li>
+                <li><b>ATR 跟踪止盈</b>：价格先往有利方向走，再按“波动幅度”动态抬高止盈线，适合让利润奔跑。</li>
+                <li><b>利润回撤</b>：先允许仓位赚起来，等利润从高点回撤到你设的比例再走，适合防止“赚过很多最后吐回去”。</li>
+            </ul>
+            <p>如果你只想先跑通一版，建议先配 <b>止损 + 时间退出 + 固定止盈</b>。这三个最容易理解，也最方便排查回测结果。</p>
         </div>
         <div class='guide-card'>
-            <h3>4. 参数扫描与结果阅读</h3>
-            <p>参数扫描适合先小范围试验，再逐步扩大。完成回测后，优先查看绩效总览和净值回撤，再下钻交易明细核对成交语义。</p>
+            <h3>4. 分批止盈可以理解成“分几次卖”</h3>
+            <p>不开启分批时，默认是一笔买入、一笔卖出。开启后，你可以把仓位拆成 2~3 批，比如“先卖 50% 锁利润，剩下 50% 继续拿”。</p>
+            <ul>
+                <li><b>仓位比例</b>：这一批卖多少。</li>
+                <li><b>执行优先级</b>：同一天多个条件都满足时，先执行谁。数字越小越先执行。</li>
+                <li><b>固定止盈 / 均线离场 / ATR 跟踪 / 利润回撤</b>：表示这一批用哪种卖法。</li>
+            </ul>
+            <p>实用例子：第 1 批用固定止盈先落袋，第 2 批用 ATR 跟踪或利润回撤去吃后面的趋势。</p>
+        </div>
+        <div class='guide-card'>
+            <h3>5. 参数扫描不是“越多越好”，而是先小后大</h3>
+            <p>参数扫描就是批量帮你试很多组参数。建议先拿 1~2 个参数、小范围、少组合试跑，确认逻辑没问题，再扩大范围。不然很容易跑很久，还看不出重点。</p>
+            <p>看结果时，先看三件事：<b>收益率</b>、<b>最大回撤</b>、<b>交易明细</b>。如果总收益看起来不错，但回撤很大、成交方式也不符合预期，那这组参数通常不值得继续深挖。</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -983,8 +1003,12 @@ def build_scan_column_config() -> dict[str, object]:
         ),
         "连续K线根数": st.column_config.TextColumn("连续K线根数", width="small"),
         "ATR过滤周期": st.column_config.TextColumn("ATR过滤周期", width="small"),
-        "最小ATR波动过滤": st.column_config.TextColumn("最小ATR波动过滤", width="small"),
-        "最大ATR波动过滤": st.column_config.TextColumn("最大ATR波动过滤", width="small"),
+        "最小ATR波动过滤": st.column_config.TextColumn(
+            "最小ATR波动过滤", width="small"
+        ),
+        "最大ATR波动过滤": st.column_config.TextColumn(
+            "最大ATR波动过滤", width="small"
+        ),
         "单根最小实体幅度": st.column_config.TextColumn(
             "单根最小实体幅度", width="small"
         ),
@@ -1470,7 +1494,9 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
 
     with core_exit_col:
         st.markdown("**退出与风控**")
-        st.caption("整笔退出保留在这里，ATR 跟踪与其他整笔退出并列；固定止盈放在次级入口。")
+        st.caption(
+            "整笔退出保留在这里，ATR 跟踪与其他整笔退出并列；固定止盈放在次级入口。"
+        )
         use_time_stop = st.checkbox("启用时间退出", value=True, key="use_time_stop")
         time_stop_cols = st.columns(2)
         time_stop_days = time_stop_cols[0].number_input(
@@ -1522,7 +1548,9 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
             disabled=not enable_atr_trailing_exit,
         )
         take_profit_cols = st.columns(2)
-        enable_take_profit = take_profit_cols[0].checkbox("启用固定止盈（次级）", value=True)
+        enable_take_profit = take_profit_cols[0].checkbox(
+            "启用固定止盈（次级）", value=True
+        )
         take_profit_pct = take_profit_cols[1].number_input(
             "固定止盈（%）",
             min_value=0.0,
@@ -1608,9 +1636,12 @@ with advanced_cols[0]:
                 mode = c2.selectbox(
                     f"退出方式（第{i}批）",
                     options=["fixed_tp", "ma_exit", "profit_drawdown", "atr_trailing"],
-                    index=["fixed_tp", "ma_exit", "profit_drawdown", "atr_trailing"].index(
-                        mode_default
-                    ),
+                    index=[
+                        "fixed_tp",
+                        "ma_exit",
+                        "profit_drawdown",
+                        "atr_trailing",
+                    ].index(mode_default),
                     format_func=lambda value: str(
                         PARTIAL_EXIT_MODE_LABELS.get(value, value) or value
                     ),
@@ -1678,7 +1709,9 @@ with advanced_cols[0]:
                         "min_profit_to_activate_drawdown": float(mpa)
                         if mode == "profit_drawdown"
                         else None,
-                        "atr_period": int(atr_period) if mode == "atr_trailing" else None,
+                        "atr_period": int(atr_period)
+                        if mode == "atr_trailing"
+                        else None,
                         "atr_multiplier": float(atr_multiplier)
                         if mode == "atr_trailing"
                         else None,

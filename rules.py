@@ -134,7 +134,10 @@ def _has_non_decreasing_body_strength(values: pd.Series) -> float:
     if any(pd.isna(value) for value in sequence):
         return 0.0
     return float(
-        all(float(sequence[idx]) <= float(sequence[idx + 1]) for idx in range(len(sequence) - 1))
+        all(
+            float(sequence[idx]) <= float(sequence[idx + 1])
+            for idx in range(len(sequence) - 1)
+        )
     )
 
 
@@ -150,8 +153,8 @@ def _build_candle_run_signal_mask(
     all_directional = pd.Series(
         prior_directional.rolling(run_length).sum(), index=stock_df.index
     ).eq(float(run_length))
-    min_body_ok = prior_body_pct.rolling(run_length).min().ge(
-        params.candle_run_min_body_pct
+    min_body_ok = (
+        prior_body_pct.rolling(run_length).min().ge(params.candle_run_min_body_pct)
     )
 
     first_open = _column(stock_df, "open").shift(run_length)
@@ -166,10 +169,14 @@ def _build_candle_run_signal_mask(
 
     signal_mask = all_directional & min_body_ok & total_move_ok
     if params.entry_factor == "candle_run_acceleration":
-        acceleration_ok = prior_body_pct.rolling(run_length).apply(
-            _has_non_decreasing_body_strength,
-            raw=False,
-        ).eq(1.0)
+        acceleration_ok = (
+            prior_body_pct.rolling(run_length)
+            .apply(
+                _has_non_decreasing_body_strength,
+                raw=False,
+            )
+            .eq(1.0)
+        )
         signal_mask &= acceleration_ok
     return signal_mask.fillna(False)
 
@@ -185,7 +192,9 @@ def _resolve_entry_execution(
 
     trigger_price_raw = signal_row["entry_trigger_price"]
     trigger_price = (
-        math.nan if _is_missing_scalar(trigger_price_raw) else _float_scalar(trigger_price_raw)
+        math.nan
+        if _is_missing_scalar(trigger_price_raw)
+        else _float_scalar(trigger_price_raw)
     )
     if pd.isna(trigger_price):
         return None, math.nan, None, "entry_not_filled", entry_factor
@@ -217,7 +226,9 @@ def _resolve_entry_execution(
 
     volume = signal_row["volume"] if "volume" in signal_row else math.nan
     is_one_price_bar = day_open == day_high == day_low == day_close
-    has_nonpositive_volume = (not _is_missing_scalar(volume)) and _float_scalar(volume) <= 0.0
+    has_nonpositive_volume = (not _is_missing_scalar(volume)) and _float_scalar(
+        volume
+    ) <= 0.0
     if has_nonpositive_volume or is_one_price_bar:
         return None, trigger_price, None, "locked_bar_unfillable", entry_factor
 
@@ -428,6 +439,61 @@ def _compute_profit_drawdown_ratio(
     ) / peak_total_profit_ratio
 
 
+def _price_from_position_profit_ratio(
+    reference_entry_price: float,
+    position_profit_ratio: float,
+    direction: str,
+) -> float:
+    if direction == "short":
+        return reference_entry_price * (1.0 - position_profit_ratio)
+    return reference_entry_price * (1.0 + position_profit_ratio)
+
+
+def _profit_drawdown_trigger_price(
+    peak_total_profit_ratio: float,
+    realized_profit_ratio: float,
+    remaining_weight: float,
+    reference_entry_price: float,
+    drawdown_ratio: float | None,
+    min_profit_to_activate_drawdown_ratio: float,
+    direction: str,
+) -> float | None:
+    if drawdown_ratio is None or remaining_weight <= EPSILON:
+        return None
+    if peak_total_profit_ratio < min_profit_to_activate_drawdown_ratio:
+        return None
+    target_total_profit_ratio = peak_total_profit_ratio * (1.0 - drawdown_ratio)
+    remaining_position_profit_ratio = (
+        target_total_profit_ratio - realized_profit_ratio
+    ) / remaining_weight
+    return _price_from_position_profit_ratio(
+        reference_entry_price, remaining_position_profit_ratio, direction
+    )
+
+
+def _resolve_exit_trigger_execution(
+    day_row: pd.Series,
+    trigger_price: float | None,
+    direction: str,
+) -> float | None:
+    if trigger_price is None:
+        return None
+    day_open = _float_scalar(day_row["open"])
+    day_high = _float_scalar(day_row["high"])
+    day_low = _float_scalar(day_row["low"])
+    if direction == "short":
+        if day_open >= trigger_price:
+            return day_open
+        if day_open < trigger_price <= day_high:
+            return trigger_price
+        return None
+    if day_open <= trigger_price:
+        return day_open
+    if day_open > trigger_price >= day_low:
+        return trigger_price
+    return None
+
+
 def _rule_triggered(
     rule: PartialExitRule,
     day_row: pd.Series,
@@ -466,19 +532,7 @@ def _rule_triggered(
         )
 
     if rule.mode == "profit_drawdown":
-        if (
-            rule.drawdown_ratio is None
-            or rule.min_profit_to_activate_drawdown_ratio is None
-        ):
-            return False
-        if peak_total_profit_ratio < rule.min_profit_to_activate_drawdown_ratio:
-            return False
-        profit_drawdown = _compute_profit_drawdown_ratio(
-            peak_total_profit_ratio, current_total_profit_ratio
-        )
-        if pd.isna(profit_drawdown):
-            return False
-        return profit_drawdown >= rule.drawdown_ratio
+        return False
 
     if rule.mode == "atr_trailing":
         if trailing_stop_price is None:
@@ -578,6 +632,9 @@ def simulate_trade(
         day_high = float(day_row["high"])
         day_low = float(day_row["low"])
         favorable_price = day_low if direction == "short" else day_high
+        prior_peak_total_profit_ratio = peak_total_profit_ratio
+        bar_start_realized_trigger_profit_ratio = realized_trigger_profit_ratio
+        bar_start_remaining_weight = remaining_weight
 
         # 1) 全仓止损
         stop_hit = (
@@ -619,6 +676,8 @@ def simulate_trade(
                     direction,
                 )
                 trailing_stop_price: float | None = None
+                profit_drawdown_fill_price: float | None = None
+                profit_drawdown_peak_total_profit_ratio: float | None = None
                 if rule.mode == "atr_trailing" and rule.atr_period is not None:
                     atr_series = partial_atr_series.get(int(rule.atr_period))
                     atr_value = (
@@ -632,7 +691,26 @@ def simulate_trade(
                         rule.atr_multiplier,
                         direction,
                     )
-                if not _rule_triggered(
+                if rule.mode == "profit_drawdown":
+                    prior_trigger_price = _profit_drawdown_trigger_price(
+                        prior_peak_total_profit_ratio,
+                        bar_start_realized_trigger_profit_ratio,
+                        bar_start_remaining_weight,
+                        reference_buy_price,
+                        rule.drawdown_ratio,
+                        rule.min_profit_to_activate_drawdown_ratio,
+                        direction,
+                    )
+                    profit_drawdown_fill_price = _resolve_exit_trigger_execution(
+                        day_row, prior_trigger_price, direction
+                    )
+                    if profit_drawdown_fill_price is not None:
+                        profit_drawdown_peak_total_profit_ratio = (
+                            prior_peak_total_profit_ratio
+                        )
+                    if profit_drawdown_fill_price is None:
+                        continue
+                elif not _rule_triggered(
                     rule,
                     day_row,
                     reference_buy_price,
@@ -665,8 +743,25 @@ def simulate_trade(
                     if pd.notna(ma_value):
                         triggered_exit_ma_value = float(ma_value)
                 if rule.mode == "profit_drawdown":
+                    if (
+                        profit_drawdown_fill_price is None
+                        or profit_drawdown_peak_total_profit_ratio is None
+                    ):
+                        continue
+                    reference_fill_price = profit_drawdown_fill_price
+                    fill_price = _apply_exit_slippage(
+                        profit_drawdown_fill_price, params, direction
+                    )
+                    execution_total_profit_ratio = _total_trade_profit_ratio(
+                        bar_start_realized_trigger_profit_ratio,
+                        bar_start_remaining_weight,
+                        reference_buy_price,
+                        reference_fill_price,
+                        direction,
+                    )
                     triggered_profit_drawdown_ratio = _compute_profit_drawdown_ratio(
-                        current_peak_total_profit_ratio, current_total_profit_ratio
+                        float(profit_drawdown_peak_total_profit_ratio),
+                        execution_total_profit_ratio,
                     )
                 if rule.mode == "atr_trailing" and trailing_stop_price is not None:
                     reference_fill_price = trailing_stop_price
@@ -775,13 +870,10 @@ def simulate_trade(
                     params.atr_trailing_multiplier,
                     direction,
                 )
-                atr_hit = (
-                    trailing_stop_price is not None
-                    and (
-                        day_high >= trailing_stop_price
-                        if direction == "short"
-                        else day_low <= trailing_stop_price
-                    )
+                atr_hit = trailing_stop_price is not None and (
+                    day_high >= trailing_stop_price
+                    if direction == "short"
+                    else day_low <= trailing_stop_price
                 )
                 if atr_hit and trailing_stop_price is not None:
                     fills.append(
