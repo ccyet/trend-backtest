@@ -307,18 +307,51 @@ def test_parameter_scan_validation_accepts_candle_run_acceleration_axis() -> Non
 def test_selected_strategy_variants_are_present_in_model_contract() -> None:
     assert "candle_run" in ENTRY_FACTORS
     assert "candle_run_acceleration" in ENTRY_FACTORS
+    assert "early_surge_high_base" in ENTRY_FACTORS
+    assert "eshb_trigger_buffer_pct" in FACTOR_SCAN_ELIGIBLE_FIELDS["early_surge_high_base"]
     assert (
         FACTOR_SCAN_ELIGIBLE_FIELDS["candle_run"]
         == FACTOR_SCAN_ELIGIBLE_FIELDS["candle_run_acceleration"]
     )
 
 
-def test_validation_rejects_reserved_intraday_timeframe_until_data_is_connected() -> (
-    None
-):
+def test_validation_accepts_intraday_timeframes() -> None:
     params = make_params(ParamScanConfig(enabled=False), timeframe="30m")
     errors, _ = validate_params(params)
-    assert any("timeframe 插座" in error for error in errors)
+    assert not errors
+
+    params_15m = make_params(ParamScanConfig(enabled=False), timeframe="15m")
+    errors_15m, _ = validate_params(params_15m)
+    assert not errors_15m
+
+    params_5m = make_params(ParamScanConfig(enabled=False), timeframe="5m")
+    errors_5m, _ = validate_params(params_5m)
+    assert not errors_5m
+
+
+def test_validation_rejects_invalid_timeframe_value() -> None:
+    params = make_params(ParamScanConfig(enabled=False), timeframe="2m")
+    errors, _ = validate_params(params)
+    assert any("timeframe" in error for error in errors)
+
+
+def test_validation_enforces_eshb_intraday_contract() -> None:
+    params = make_params(
+        ParamScanConfig(enabled=False),
+        entry_factor="early_surge_high_base",
+        timeframe="30m",
+        data_source_type="local_parquet",
+    )
+    errors, _ = validate_params(params)
+    assert not errors
+
+    invalid_timeframe = make_params(
+        ParamScanConfig(enabled=False),
+        entry_factor="early_surge_high_base",
+        timeframe="1d",
+    )
+    invalid_errors, _ = validate_params(invalid_timeframe)
+    assert any("timeframe=30m" in error for error in invalid_errors)
 
 
 def test_parameter_scan_validation_accepts_partial_rule_fixed_tp_axis() -> None:

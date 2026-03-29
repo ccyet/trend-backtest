@@ -420,3 +420,125 @@ def test_candle_run_acceleration_requires_non_decreasing_body_strength() -> None
 
     assert bool(accelerating.loc[2, "is_signal"])
     assert not bool(decelerating.loc[2, "is_signal"])
+
+
+def test_eshb_setup_detects_valid_30m_pattern_and_populates_diagnostics() -> None:
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [
+                    "2024-01-02 09:30:00",
+                    "2024-01-02 10:00:00",
+                    "2024-01-02 10:30:00",
+                    "2024-01-02 11:00:00",
+                    "2024-01-02 11:30:00",
+                ]
+            ),
+            "stock_code": ["000001.SZ"] * 5,
+            "open": [100.0, 100.0, 104.5, 104.6, 104.8],
+            "high": [101.0, 105.0, 104.8, 104.9, 105.0],
+            "low": [99.0, 99.8, 104.2, 104.3, 104.7],
+            "close": [100.0, 104.5, 104.6, 104.7, 104.9],
+            "volume": [100.0, 300.0, 120.0, 110.0, 130.0],
+        }
+    )
+    params = make_params(
+        entry_factor="early_surge_high_base",
+        timeframe="30m",
+        eshb_open_window_bars=3,
+        eshb_base_min_bars=2,
+        eshb_base_max_bars=4,
+        eshb_surge_min_pct=3.0,
+        eshb_max_base_pullback_pct=2.5,
+        eshb_max_base_range_pct=1.0,
+        eshb_max_anchor_breaks=0,
+        eshb_max_anchor_break_depth_pct=0.5,
+        eshb_min_open_volume_ratio=1.5,
+        eshb_trigger_buffer_pct=0.0,
+    )
+
+    enriched = apply_gap_filters(df, params)
+
+    assert bool(enriched.loc[4, "is_signal"])
+    assert float(enriched.loc[4, "eshb_base_bars"]) == 2
+    assert float(enriched.loc[4, "eshb_surge_pct"]) >= 3.0
+    assert pd.notna(enriched.loc[4, "entry_trigger_price"])
+
+
+def test_eshb_setup_rejects_invalid_base_pullback_shape() -> None:
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [
+                    "2024-01-02 09:30:00",
+                    "2024-01-02 10:00:00",
+                    "2024-01-02 10:30:00",
+                    "2024-01-02 11:00:00",
+                ]
+            ),
+            "stock_code": ["000001.SZ"] * 4,
+            "open": [100.0, 100.0, 104.5, 101.0],
+            "high": [101.0, 105.0, 104.8, 101.5],
+            "low": [99.0, 99.8, 100.0, 100.5],
+            "close": [100.0, 104.5, 101.2, 101.3],
+            "volume": [100.0, 300.0, 120.0, 110.0],
+        }
+    )
+    params = make_params(
+        entry_factor="early_surge_high_base",
+        timeframe="30m",
+        eshb_open_window_bars=3,
+        eshb_base_min_bars=1,
+        eshb_base_max_bars=3,
+        eshb_surge_min_pct=3.0,
+        eshb_max_base_pullback_pct=1.0,
+        eshb_min_open_volume_ratio=1.0,
+    )
+
+    enriched = apply_gap_filters(df, params)
+
+    assert not bool(enriched.loc[3, "is_signal"])
+
+
+def test_eshb_trade_preserves_intraday_timestamp_and_trigger_metadata() -> None:
+    execution_df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [
+                    "2024-01-02 11:40:00",
+                    "2024-01-02 11:45:00",
+                    "2024-01-02 11:50:00",
+                ]
+            ),
+            "stock_code": ["000001.SZ"] * 3,
+            "open": [105.1, 105.2, 105.5],
+            "high": [105.4, 105.6, 105.8],
+            "low": [104.9, 105.0, 105.3],
+            "close": [105.2, 105.5, 105.7],
+            "volume": [200.0, 210.0, 220.0],
+        }
+    )
+    execution_df["prev_close"] = execution_df["close"].shift(1)
+    execution_df["prev_high"] = execution_df["high"].shift(1)
+    execution_df["prev_low"] = execution_df["low"].shift(1)
+    execution_df["gap_pct_vs_prev_close"] = (
+        execution_df["open"] / execution_df["prev_close"] - 1.0
+    ) * 100.0
+    execution_df["entry_factor"] = "early_surge_high_base"
+    execution_df["entry_trigger_price"] = [float("nan"), 105.0, float("nan")]
+
+    params = make_params(
+        entry_factor="early_surge_high_base",
+        timeframe="30m",
+        time_stop_days=1,
+        time_stop_target_pct=-100.0,
+        time_exit_mode="force_close",
+    )
+    trade, reason = simulate_trade(execution_df, 1, params)
+
+    assert reason is None
+    assert trade is not None
+    assert trade["entry_factor"] == "early_surge_high_base"
+    assert trade["entry_fill_type"] == "open"
+    assert float(trade["entry_trigger_price"]) == 105.0
+    assert str(trade["buy_date"]).startswith("2024-01-02 11:45:00")

@@ -7,20 +7,25 @@ import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 
-def test_app_exposes_new_strategy_modes_and_timeframe_socket() -> None:
+def test_app_exposes_new_strategy_modes_and_intraday_timeframe_support() -> None:
     app = AppTest.from_file("app.py", default_timeout=10)
     app.run()
 
     entry_factor = app.selectbox(key="entry_factor")
     assert "连续K线追势" in entry_factor.options
     assert "连续K线加速追势" in entry_factor.options
+    assert "早盘冲高高位横盘突破" in entry_factor.options
 
     timeframe = app.selectbox(key="timeframe")
-    assert timeframe.label == "周期（预留 30m/15m 插座）"
-    assert timeframe.options == ["1d", "30m", "15m"]
+    assert timeframe.label == "周期"
+    assert timeframe.options == ["1d", "30m", "15m", "5m"]
+
+    update_timeframe = app.selectbox(key="offline_update_timeframe")
+    assert update_timeframe.options == ["1d", "30m", "15m", "5m"]
 
     captions = [caption.value for caption in app.caption]
-    assert "当前回测执行按 1d 生效；30m / 15m 为后续接入预留。" in captions
+    assert "1d 为常规日线；early_surge_high_base 使用 30m 形态并自动切换到 5m 执行。" in captions
+    assert "分钟级数据已支持 30m / 15m / 5m 更新；当前策略执行与展示仍以现有模型约束为主。" in captions
 
 
 def test_app_updates_direction_options_for_acceleration_mode() -> None:
@@ -135,6 +140,27 @@ def test_app_preserves_candle_run_acceleration_length_above_two() -> None:
     app.run()
 
     assert app.number_input(key="candle_run_length").value == 5
+
+
+def test_app_exposes_eshb_controls_and_scan_fields() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    app.selectbox(key="entry_factor").set_value("early_surge_high_base")
+    app.run()
+
+    direction = app.selectbox(key="direction_label")
+    assert direction.options == ["早盘冲高高位横盘突破"]
+
+    number_input_labels = [widget.label for widget in app.number_input]
+    assert "早盘观察窗口K数" in number_input_labels
+    assert "高位横盘最少K数" in number_input_labels
+    assert "突破量能倍数下限" in number_input_labels
+    assert "突破触发缓冲（%）" in number_input_labels
+
+    scan_axis_1 = app.selectbox(key="scan_axis_1_field")
+    assert "早盘观察窗口K数" in scan_axis_1.options
+    assert "突破触发缓冲" in scan_axis_1.options
 
 
 def test_app_exposes_backtest_date_presets_and_applies_shortcut() -> None:

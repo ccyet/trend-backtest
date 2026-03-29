@@ -392,3 +392,75 @@ def test_analyze_all_stocks_supports_short_candle_run_acceleration_strategy_leve
     assert int(stats["executed_trades"]) == 1
     assert float(stats["strategy_win_rate_pct"]) == 100.0
     assert float(stats["total_return_pct"]) > 0.0
+
+
+def test_scan_trade_candidates_supports_eshb_30m_setup_and_5m_execution(
+    monkeypatch,
+) -> None:
+    setup_data = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [
+                    "2024-01-02 09:30:00",
+                    "2024-01-02 10:00:00",
+                    "2024-01-02 10:30:00",
+                    "2024-01-02 11:00:00",
+                    "2024-01-02 11:30:00",
+                ]
+            ),
+            "stock_code": ["000001.SZ"] * 5,
+            "open": [100.0, 100.0, 104.5, 104.6, 104.8],
+            "high": [101.0, 105.0, 104.8, 104.9, 105.0],
+            "low": [99.0, 99.8, 104.2, 104.3, 104.7],
+            "close": [100.0, 104.5, 104.6, 104.7, 104.9],
+            "volume": [100.0, 300.0, 120.0, 110.0, 130.0],
+        }
+    )
+    execution_data = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [
+                    "2024-01-02 11:35:00",
+                    "2024-01-02 11:40:00",
+                    "2024-01-02 11:45:00",
+                    "2024-01-02 11:50:00",
+                ]
+            ),
+            "stock_code": ["000001.SZ"] * 4,
+            "open": [104.9, 105.0, 105.1, 105.4],
+            "high": [105.0, 105.2, 105.5, 105.8],
+            "low": [104.8, 104.9, 105.0, 105.2],
+            "close": [105.0, 105.1, 105.4, 105.7],
+            "volume": [120.0, 130.0, 280.0, 210.0],
+        }
+    )
+
+    monkeypatch.setattr(analyzer, "load_local_parquet_data", lambda **_: execution_data)
+
+    detail_df, stats = analyzer.scan_trade_candidates(
+        setup_data,
+        make_params(
+            entry_factor="early_surge_high_base",
+            timeframe="30m",
+            start_date="2024-01-02",
+            end_date="2024-01-02",
+            eshb_open_window_bars=3,
+            eshb_base_min_bars=2,
+            eshb_base_max_bars=4,
+            eshb_surge_min_pct=3.0,
+            eshb_max_base_pullback_pct=2.5,
+            eshb_max_base_range_pct=1.0,
+            eshb_max_anchor_breaks=0,
+            eshb_max_anchor_break_depth_pct=0.5,
+            eshb_min_open_volume_ratio=1.5,
+            eshb_min_breakout_volume_ratio=1.0,
+            eshb_trigger_buffer_pct=0.0,
+            time_stop_days=1,
+        ),
+    )
+
+    assert len(detail_df) == 1
+    assert int(stats["signal_count"]) == 1
+    assert int(stats["closed_trade_candidates"]) == 1
+    assert detail_df.iloc[0]["entry_factor"] == "early_surge_high_base"
+    assert detail_df.iloc[0]["entry_fill_type"] == "open"
