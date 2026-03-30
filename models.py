@@ -10,6 +10,7 @@ ENTRY_FACTORS = (
     "volatility_contraction_breakout",
     "candle_run",
     "candle_run_acceleration",
+    "early_surge_high_base",
 )
 SCAN_METRICS = (
     "signal_count",
@@ -32,6 +33,17 @@ SCAN_FIELD_CASTERS: dict[str, type[int] | type[float]] = {
     "candle_run_length": int,
     "candle_run_min_body_pct": float,
     "candle_run_total_move_pct": float,
+    "eshb_open_window_bars": int,
+    "eshb_base_min_bars": int,
+    "eshb_base_max_bars": int,
+    "eshb_surge_min_pct": float,
+    "eshb_max_base_pullback_pct": float,
+    "eshb_max_base_range_pct": float,
+    "eshb_max_anchor_breaks": int,
+    "eshb_max_anchor_break_depth_pct": float,
+    "eshb_min_open_volume_ratio": float,
+    "eshb_min_breakout_volume_ratio": float,
+    "eshb_trigger_buffer_pct": float,
     "atr_filter_period": int,
     "min_atr_filter_pct": float,
     "max_atr_filter_pct": float,
@@ -177,6 +189,23 @@ FACTOR_SCAN_ELIGIBLE_FIELDS: dict[str, frozenset[str]] = {
             *PARTIAL_EXIT_SCAN_FIELDS,
         }
     ),
+    "early_surge_high_base": frozenset(
+        {
+            "eshb_open_window_bars",
+            "eshb_base_min_bars",
+            "eshb_base_max_bars",
+            "eshb_surge_min_pct",
+            "eshb_max_base_pullback_pct",
+            "eshb_max_base_range_pct",
+            "eshb_max_anchor_breaks",
+            "eshb_max_anchor_break_depth_pct",
+            "eshb_min_open_volume_ratio",
+            "eshb_min_breakout_volume_ratio",
+            "eshb_trigger_buffer_pct",
+            *BASE_FACTOR_SCAN_FIELDS,
+            *PARTIAL_EXIT_SCAN_FIELDS,
+        }
+    ),
 }
 
 
@@ -301,6 +330,17 @@ class AnalysisParams:
     candle_run_length: int = 2
     candle_run_min_body_pct: float = 1.0
     candle_run_total_move_pct: float = 2.0
+    eshb_open_window_bars: int = 6
+    eshb_base_min_bars: int = 2
+    eshb_base_max_bars: int = 8
+    eshb_surge_min_pct: float = 3.0
+    eshb_max_base_pullback_pct: float = 2.5
+    eshb_max_base_range_pct: float = 2.0
+    eshb_max_anchor_breaks: int = 1
+    eshb_max_anchor_break_depth_pct: float = 0.8
+    eshb_min_open_volume_ratio: float = 1.2
+    eshb_min_breakout_volume_ratio: float = 1.0
+    eshb_trigger_buffer_pct: float = 0.05
     timeframe: str = "1d"
     local_data_root: str = "data/market/daily"
     adjust: str = "qfq"
@@ -377,6 +417,11 @@ class AnalysisParams:
             )
         if self.entry_factor in {"candle_run", "candle_run_acceleration"}:
             lookback = max(lookback, self.candle_run_length + 5)
+        if self.entry_factor == "early_surge_high_base":
+            lookback = max(
+                lookback,
+                self.eshb_open_window_bars + self.eshb_base_max_bars + 10,
+            )
         return lookback
 
     @property
@@ -506,10 +551,10 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
     if params.adjust not in {"qfq", "hfq"}:
         errors.append("复权方式只能为 qfq 或 hfq。")
 
-    if params.timeframe not in {"1d", "30m", "15m"}:
-        errors.append("timeframe 只能为 1d、30m 或 15m。")
-    elif params.timeframe != "1d":
-        errors.append("当前版本仅预留 timeframe 插座，15m/30m 数据接入将在后续扩展。")
+    if params.timeframe not in {"1d", "30m", "15m", "5m"}:
+        errors.append("timeframe 只能为 1d、30m、15m 或 5m。")
+    elif params.timeframe in {"30m", "15m", "5m"} and not params.stock_codes:
+        warnings.append("分钟级数据在未指定股票池时 IO 开销较高，建议先限定股票池。")
 
     if params.gap_pct < 0:
         errors.append("跳空幅度不能为负数。")
@@ -537,6 +582,47 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.candle_run_total_move_pct < 0:
         errors.append("candle_run_total_move_pct 不能为负数。")
+
+    if params.eshb_open_window_bars < 1:
+        errors.append("eshb_open_window_bars 必须大于等于 1。")
+
+    if params.eshb_base_min_bars < 1:
+        errors.append("eshb_base_min_bars 必须大于等于 1。")
+
+    if params.eshb_base_max_bars < params.eshb_base_min_bars:
+        errors.append("eshb_base_max_bars 不能小于 eshb_base_min_bars。")
+
+    if params.eshb_surge_min_pct < 0:
+        errors.append("eshb_surge_min_pct 不能为负数。")
+
+    if params.eshb_max_base_pullback_pct < 0:
+        errors.append("eshb_max_base_pullback_pct 不能为负数。")
+
+    if params.eshb_max_base_range_pct < 0:
+        errors.append("eshb_max_base_range_pct 不能为负数。")
+
+    if params.eshb_max_anchor_breaks < 0:
+        errors.append("eshb_max_anchor_breaks 不能为负数。")
+
+    if params.eshb_max_anchor_break_depth_pct < 0:
+        errors.append("eshb_max_anchor_break_depth_pct 不能为负数。")
+
+    if params.eshb_min_open_volume_ratio < 0:
+        errors.append("eshb_min_open_volume_ratio 不能为负数。")
+
+    if params.eshb_min_breakout_volume_ratio < 0:
+        errors.append("eshb_min_breakout_volume_ratio 不能为负数。")
+
+    if params.eshb_trigger_buffer_pct < 0:
+        errors.append("eshb_trigger_buffer_pct 不能为负数。")
+
+    if params.entry_factor == "early_surge_high_base":
+        if params.timeframe != "30m":
+            errors.append("early_surge_high_base 仅支持 timeframe=30m（30m 形态 + 5m 执行）。")
+        if params.data_source_type != "local_parquet":
+            errors.append("early_surge_high_base 仅支持 local_parquet 数据源。")
+        if params.gap_direction != "up":
+            errors.append("early_surge_high_base 当前仅支持向上方向（gap_direction=up）。")
 
     if params.stop_loss_pct < 0:
         errors.append("止损比例不能为负数。")

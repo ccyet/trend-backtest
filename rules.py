@@ -25,6 +25,7 @@ BREAKOUT_ENTRY_FACTORS = frozenset(
     {"trend_breakout", "volatility_contraction_breakout"}
 )
 SEQUENCE_ENTRY_FACTORS = frozenset({"candle_run", "candle_run_acceleration"})
+ESHB_ENTRY_FACTOR = "early_surge_high_base"
 
 
 def _column(stock_df: pd.DataFrame, column_name: str) -> pd.Series:
@@ -181,12 +182,133 @@ def _build_candle_run_signal_mask(
     return signal_mask.fillna(False)
 
 
+def _build_eshb_setup_frame(
+    stock_df: pd.DataFrame, params: AnalysisParams
+) -> pd.DataFrame:
+    setup_columns = pd.DataFrame(
+        {
+            "eshb_anchor_high": math.nan,
+            "eshb_anchor_low": math.nan,
+            "eshb_base_high": math.nan,
+            "eshb_base_low": math.nan,
+            "eshb_base_bars": 0,
+            "eshb_surge_pct": math.nan,
+            "eshb_open_volume_ratio": math.nan,
+            "eshb_anchor_break_count": 0,
+            "eshb_anchor_break_depth_pct": math.nan,
+            "eshb_breakout_volume_ratio": math.nan,
+        },
+        index=stock_df.index,
+    )
+
+    if params.gap_direction != "up":
+        return setup_columns
+
+    for idx in range(len(stock_df)):
+        if idx < 2:
+            continue
+        window_start = max(0, idx - params.eshb_open_window_bars)
+        anchor_window = stock_df.iloc[window_start:idx]
+        if anchor_window.empty:
+            continue
+
+        anchor_idx = int(anchor_window["high"].idxmax())
+        if anchor_idx >= idx:
+            continue
+
+        base_start = anchor_idx + 1
+        base_slice = stock_df.iloc[base_start:idx]
+        base_bars = len(base_slice)
+        if base_bars < params.eshb_base_min_bars or base_bars > params.eshb_base_max_bars:
+            continue
+
+        anchor_high = float(stock_df.iloc[anchor_idx]["high"])
+        anchor_low = float(stock_df.iloc[anchor_idx]["low"])
+        opening_ref = float(stock_df.iloc[window_start]["open"])
+        if opening_ref <= 0:
+            continue
+        surge_pct = (anchor_high / opening_ref - 1.0) * 100.0
+        if surge_pct < params.eshb_surge_min_pct:
+            continue
+
+        base_high = float(base_slice["high"].max())
+        base_low = float(base_slice["low"].min())
+        if base_high <= 0 or anchor_high <= 0 or anchor_low <= 0:
+            continue
+        base_pullback_pct = (anchor_high - base_low) / anchor_high * 100.0
+        base_range_pct = (base_high - base_low) / base_high * 100.0
+        if base_pullback_pct > params.eshb_max_base_pullback_pct:
+            continue
+        if base_range_pct > params.eshb_max_base_range_pct:
+            continue
+
+        anchor_break_count = int((base_slice["low"] < anchor_low).sum())
+        anchor_break_depth_pct = (
+            (anchor_low - float(base_slice["low"].min())) / anchor_low * 100.0
+            if anchor_break_count > 0
+            else 0.0
+        )
+        if anchor_break_count > params.eshb_max_anchor_breaks:
+            continue
+        if anchor_break_depth_pct > params.eshb_max_anchor_break_depth_pct:
+            continue
+
+        prior_volume_window = stock_df.iloc[max(0, anchor_idx - params.eshb_open_window_bars) : anchor_idx]
+        baseline_volume = float(prior_volume_window["volume"].mean())
+        anchor_volume = float(stock_df.iloc[anchor_idx]["volume"])
+        open_volume_ratio = (
+            anchor_volume / baseline_volume
+            if baseline_volume > EPSILON and not pd.isna(anchor_volume)
+            else math.nan
+        )
+        if pd.isna(open_volume_ratio) or open_volume_ratio < params.eshb_min_open_volume_ratio:
+            continue
+
+        setup_columns.loc[idx, "eshb_anchor_high"] = anchor_high
+        setup_columns.loc[idx, "eshb_anchor_low"] = anchor_low
+        setup_columns.loc[idx, "eshb_base_high"] = base_high
+        setup_columns.loc[idx, "eshb_base_low"] = base_low
+        setup_columns.loc[idx, "eshb_base_bars"] = int(base_bars)
+        setup_columns.loc[idx, "eshb_surge_pct"] = surge_pct
+        setup_columns.loc[idx, "eshb_open_volume_ratio"] = open_volume_ratio
+        setup_columns.loc[idx, "eshb_anchor_break_count"] = int(anchor_break_count)
+        setup_columns.loc[idx, "eshb_anchor_break_depth_pct"] = float(anchor_break_depth_pct)
+
+    return setup_columns
+
+
+def _trade_timestamp_str(value: object, params: AnalysisParams) -> str:
+    parsed = pd.to_datetime(cast(Any, value), errors="coerce")
+    if bool(cast(Any, pd.isna(parsed))):
+        return ""
+    timestamp = cast(pd.Timestamp, parsed)
+    if params.timeframe == "1d":
+        return str(timestamp.date())
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _trade_date_value(value: object, params: AnalysisParams) -> object:
+    parsed = pd.to_datetime(cast(Any, value), errors="coerce")
+    if bool(cast(Any, pd.isna(parsed))):
+        return pd.NaT
+    timestamp = cast(pd.Timestamp, parsed)
+    if params.timeframe == "1d":
+        return timestamp.date()
+    return timestamp
+
+
 def _resolve_entry_execution(
     signal_row: pd.Series,
     params: AnalysisParams,
     direction: str,
 ) -> tuple[float | None, float, str | None, str | None, str]:
     entry_factor = str(signal_row.get("entry_factor", params.entry_factor))
+    if entry_factor == ESHB_ENTRY_FACTOR:
+        trigger_raw = signal_row.get("entry_trigger_price", math.nan)
+        trigger_value = (
+            math.nan if _is_missing_scalar(trigger_raw) else _float_scalar(trigger_raw)
+        )
+        return _float_scalar(signal_row["open"]), trigger_value, "open", None, entry_factor
     if entry_factor not in BREAKOUT_ENTRY_FACTORS:
         return _float_scalar(signal_row["open"]), math.nan, "open", None, entry_factor
 
@@ -263,6 +385,16 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
     stock_df["is_contraction"] = False
     stock_df["atr_filter_value"] = math.nan
     stock_df["atr_filter_pct"] = math.nan
+    stock_df["eshb_anchor_high"] = math.nan
+    stock_df["eshb_anchor_low"] = math.nan
+    stock_df["eshb_base_high"] = math.nan
+    stock_df["eshb_base_low"] = math.nan
+    stock_df["eshb_base_bars"] = 0
+    stock_df["eshb_surge_pct"] = math.nan
+    stock_df["eshb_open_volume_ratio"] = math.nan
+    stock_df["eshb_anchor_break_count"] = 0
+    stock_df["eshb_anchor_break_depth_pct"] = math.nan
+    stock_df["eshb_breakout_volume_ratio"] = math.nan
 
     signal_mask = (
         stock_df["prev_close"].notna()
@@ -319,6 +451,19 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
             else:
                 signal_mask &= stock_df["open"] > stock_df["fast_ma"]
                 signal_mask &= stock_df["open"] > stock_df["slow_ma"]
+    elif params.entry_factor == ESHB_ENTRY_FACTOR:
+        setup_frame = _build_eshb_setup_frame(stock_df, params)
+        for column in setup_frame.columns:
+            stock_df[column] = setup_frame[column]
+        stock_df["entry_trigger_price"] = stock_df["eshb_base_high"] * (
+            1.0 + params.eshb_trigger_buffer_pct / 100.0
+        )
+        signal_mask &= stock_df["eshb_base_high"].notna()
+        signal_mask &= stock_df["entry_trigger_price"].notna()
+        if params.use_ma_filter:
+            signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
+            signal_mask &= stock_df["open"] > stock_df["fast_ma"]
+            signal_mask &= stock_df["open"] > stock_df["slow_ma"]
     else:
         signal_mask &= _build_candle_run_signal_mask(stock_df, params)
         if params.use_ma_filter:
@@ -645,7 +790,7 @@ def simulate_trade(
         if stop_hit and remaining_weight > EPSILON:
             fills.append(
                 TradeFill(
-                    str(day_date.date()),
+                    _trade_timestamp_str(day_date, params),
                     _apply_exit_slippage(stop_loss_price, params, direction),
                     remaining_weight,
                     "stop_loss",
@@ -771,7 +916,7 @@ def simulate_trade(
 
                 fills.append(
                     TradeFill(
-                        str(day_date.date()),
+                        _trade_timestamp_str(day_date, params),
                         float(fill_price),
                         float(rule_weight),
                         rule.mode,
@@ -823,7 +968,7 @@ def simulate_trade(
                 ):
                     fills.append(
                         TradeFill(
-                            str(day_date.date()),
+                            _trade_timestamp_str(day_date, params),
                             _apply_exit_slippage(day_close, params, direction),
                             remaining_weight,
                             "profit_drawdown_exit",
@@ -848,7 +993,7 @@ def simulate_trade(
                     if exit_hit:
                         fills.append(
                             TradeFill(
-                                str(day_date.date()),
+                                _trade_timestamp_str(day_date, params),
                                 _apply_exit_slippage(day_close, params, direction),
                                 remaining_weight,
                                 "ma_exit",
@@ -878,7 +1023,7 @@ def simulate_trade(
                 if atr_hit and trailing_stop_price is not None:
                     fills.append(
                         TradeFill(
-                            str(day_date.date()),
+                            _trade_timestamp_str(day_date, params),
                             _apply_exit_slippage(
                                 trailing_stop_price, params, direction
                             ),
@@ -897,7 +1042,7 @@ def simulate_trade(
             if remaining_weight > EPSILON and params.enable_take_profit and tp_hit:
                 fills.append(
                     TradeFill(
-                        str(day_date.date()),
+                        _trade_timestamp_str(day_date, params),
                         _apply_exit_slippage(take_profit_price, params, direction),
                         remaining_weight,
                         "take_profit",
@@ -916,7 +1061,7 @@ def simulate_trade(
             if holding_return < params.time_stop_target_ratio:
                 fills.append(
                     TradeFill(
-                        str(day_date.date()),
+                        _trade_timestamp_str(day_date, params),
                         _apply_exit_slippage(day_close, params, direction),
                         remaining_weight,
                         "time_exit",
@@ -945,7 +1090,7 @@ def simulate_trade(
             reference_force_close = float(last_row["close"])
             fills.append(
                 TradeFill(
-                    str(pd.Timestamp(last_row["date"]).date()),
+                    _trade_timestamp_str(pd.Timestamp(last_row["date"]), params),
                     _apply_exit_slippage(reference_force_close, params, direction),
                     remaining_weight,
                     "force_close",
@@ -970,7 +1115,8 @@ def simulate_trade(
     exit_reason = "+".join(
         _exit_reason_label(str(fill["exit_type"])) for fill in fill_dicts
     )
-    sell_date = pd.to_datetime(fill_dicts[-1]["sell_date"]).date()
+    sell_ts = pd.to_datetime(fill_dicts[-1]["sell_date"])
+    sell_date = _trade_date_value(sell_ts, params)
     exit_type = "+".join(fill["exit_type"] for fill in fill_dicts)
     sell_day_idx = signal_idx + int(fill_dicts[-1]["holding_days"])
 
@@ -999,7 +1145,7 @@ def simulate_trade(
         mae = holding_slice["low"].min() / buy_price - 1.0
 
     return {
-        "date": buy_date.date(),
+        "date": _trade_date_value(buy_date, params),
         "stock_code": signal_row["stock_code"],
         "prev_close": float(signal_row["prev_close"]),
         "prev_high": float(signal_row["prev_high"]),
@@ -1010,7 +1156,7 @@ def simulate_trade(
         if pd.notna(signal_row["volume"])
         else math.nan,
         "gap_pct_vs_prev_close": float(signal_row["gap_pct_vs_prev_close"]),
-        "buy_date": str(buy_date.date()),
+        "buy_date": _trade_timestamp_str(buy_date, params),
         "buy_price": buy_price,
         "sell_price": float(weighted_sell_price),
         "sell_date": sell_date,

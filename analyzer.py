@@ -7,8 +7,9 @@ from typing import Any, cast
 
 import pandas as pd
 
+from data_loader import load_local_parquet_data
 from models import AnalysisParams, apply_scan_overrides
-from rules import apply_gap_filters, simulate_trade
+from rules import ESHB_ENTRY_FACTOR, apply_gap_filters, simulate_trade
 
 
 BASE_DETAIL_COLUMNS = [
@@ -116,17 +117,72 @@ def _empty_strategy_stats() -> dict[str, float]:
     }
 
 
+def _signal_window(params: AnalysisParams) -> tuple[pd.Timestamp, pd.Timestamp]:
+    start_ts = cast(pd.Timestamp, pd.to_datetime(params.start_date))
+    end_ts = cast(pd.Timestamp, pd.to_datetime(params.end_date))
+    if params.timeframe == "1d":
+        return start_ts, end_ts
+    intraday_end = cast(
+        pd.Timestamp,
+        end_ts + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1),
+    )
+    return start_ts, intraday_end
+
+
+def _prepare_execution_frame(stock_df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
+    execution_df = stock_df.sort_values("date").reset_index(drop=True).copy()
+    execution_df["prev_close"] = execution_df["close"].shift(1)
+    execution_df["prev_high"] = execution_df["high"].shift(1)
+    execution_df["prev_low"] = execution_df["low"].shift(1)
+    execution_df["gap_pct_vs_prev_close"] = (
+        execution_df["open"] / execution_df["prev_close"] - 1.0
+    ) * 100.0
+    execution_df["entry_factor"] = params.entry_factor
+    execution_df["entry_trigger_price"] = pd.NA
+    execution_df["entry_fill_type"] = pd.NA
+    execution_df["is_signal"] = False
+    return execution_df
+
+
+def _breakout_volume_ratio(
+    execution_df: pd.DataFrame, trigger_idx: int, lookback: int
+) -> float:
+    if trigger_idx <= 0:
+        return 1.0
+    baseline_start = max(0, trigger_idx - max(lookback, 1))
+    baseline = execution_df.iloc[baseline_start:trigger_idx]["volume"].mean()
+    trigger_volume = float(execution_df.iloc[trigger_idx]["volume"])
+    if pd.isna(baseline) or float(baseline) <= 1e-12 or pd.isna(trigger_volume):
+        return 0.0
+    return float(trigger_volume) / float(baseline)
+
+
 def scan_trade_candidates(
     all_data: pd.DataFrame, params: AnalysisParams
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     if all_data.empty:
         return pd.DataFrame(columns=pd.Index(BASE_DETAIL_COLUMNS)), _empty_scan_stats()
 
-    start_ts = pd.to_datetime(params.start_date)
-    end_ts = pd.to_datetime(params.end_date)
+    start_ts, end_ts = _signal_window(params)
 
     detail_records: list[dict[str, Any]] = []
     stats = Counter()
+
+    execution_data: pd.DataFrame | None = None
+    execution_by_code: dict[str, pd.DataFrame] = {}
+    if params.entry_factor == ESHB_ENTRY_FACTOR:
+        execution_data = load_local_parquet_data(
+            start_date=params.start_date,
+            end_date=params.end_date,
+            stock_codes=params.stock_codes,
+            lookback_days=params.required_lookback_days,
+            lookahead_days=params.required_lookahead_days,
+            local_data_root=params.local_data_root,
+            adjust=params.adjust,
+            timeframe="5m",
+        )
+        for stock_code, stock_df in execution_data.groupby("stock_code", sort=True):
+            execution_by_code[str(stock_code)] = _prepare_execution_frame(stock_df, params)
 
     for _, stock_df in all_data.groupby("stock_code", sort=True):
         enriched = apply_gap_filters(stock_df, params)
@@ -136,9 +192,47 @@ def scan_trade_candidates(
 
         for signal_idx in signal_indices:
             direction = "long" if params.gap_direction == "up" else "short"
-            trade, skip_reason = simulate_trade(
-                enriched, signal_idx, params, direction=direction
-            )
+            if params.entry_factor == ESHB_ENTRY_FACTOR:
+                setup_row = enriched.iloc[signal_idx]
+                stock_code = str(setup_row["stock_code"])
+                execution_df = execution_by_code.get(stock_code)
+                if execution_df is None or execution_df.empty:
+                    stats["skipped_no_exit"] += 1
+                    continue
+
+                trigger_price = float(setup_row["entry_trigger_price"])
+                setup_time = pd.Timestamp(setup_row["date"])
+                candidate_exec = execution_df.loc[execution_df["date"] > setup_time]
+                trigger_hits = candidate_exec.loc[candidate_exec["high"] >= trigger_price]
+                if trigger_hits.empty:
+                    trade = None
+                    skip_reason = "entry_not_filled"
+                else:
+                    trigger_idx = int(trigger_hits.index[0])
+                    breakout_volume_ratio = _breakout_volume_ratio(
+                        execution_df, trigger_idx, int(params.eshb_open_window_bars)
+                    )
+                    if breakout_volume_ratio < params.eshb_min_breakout_volume_ratio:
+                        trade = None
+                        skip_reason = "entry_not_filled"
+                    else:
+                        entry_idx = trigger_idx + 1
+                        if entry_idx >= len(execution_df):
+                            trade = None
+                            skip_reason = "insufficient_future"
+                        else:
+                            execution_df.loc[entry_idx, "entry_factor"] = ESHB_ENTRY_FACTOR
+                            execution_df.loc[entry_idx, "entry_trigger_price"] = trigger_price
+                            execution_df.loc[
+                                entry_idx, "eshb_breakout_volume_ratio"
+                            ] = breakout_volume_ratio
+                            trade, skip_reason = simulate_trade(
+                                execution_df, entry_idx, params, direction=direction
+                            )
+            else:
+                trade, skip_reason = simulate_trade(
+                    enriched, signal_idx, params, direction=direction
+                )
             if trade is None:
                 if skip_reason == "insufficient_future":
                     stats["skipped_insufficient_future"] += 1
@@ -249,8 +343,8 @@ def build_strategy_trades(
 def build_equity_curve(
     all_data: pd.DataFrame, strategy_df: pd.DataFrame, params: AnalysisParams
 ) -> pd.DataFrame:
-    start_ts = pd.to_datetime(params.start_date)
-    end_ts = pd.to_datetime(params.end_date)
+    start_ts, end_ts = _signal_window(params)
+    is_daily = params.timeframe == "1d"
 
     if strategy_df.empty:
         market_dates = [start_ts]
@@ -296,8 +390,9 @@ def build_equity_curve(
             .itertuples(index=False, name=None)
         )
         for stock_code, date_value, close_value in rows:
-            normalized_date = cast(pd.Timestamp, pd.Timestamp(date_value)).normalize()
-            close_lookup[(str(stock_code), normalized_date)] = float(close_value)
+            raw_date = cast(pd.Timestamp, pd.Timestamp(date_value))
+            lookup_date = raw_date.normalize() if is_daily else raw_date
+            close_lookup[(str(stock_code), lookup_date)] = float(close_value)
 
     trades = strategy_df.sort_values("date").to_dict("records")
     trade_index = 0
@@ -316,14 +411,16 @@ def build_equity_curve(
     }
 
     for market_date in market_dates:
-        current_date = cast(pd.Timestamp, pd.Timestamp(market_date)).normalize()
+        raw_market_date = cast(pd.Timestamp, pd.Timestamp(market_date))
+        current_date = raw_market_date.normalize() if is_daily else raw_market_date
         event_label = ""
         event_trade_no = pd.NA
         event_stock_code = ""
 
         if active_trade is None and trade_index < len(trades):
             next_trade = trades[trade_index]
-            buy_date = cast(pd.Timestamp, pd.Timestamp(next_trade["date"])).normalize()
+            buy_date_raw = cast(pd.Timestamp, pd.Timestamp(next_trade["date"]))
+            buy_date = buy_date_raw.normalize() if is_daily else buy_date_raw
             if current_date >= buy_date:
                 active_trade = next_trade
                 active_last_close = None
@@ -341,7 +438,8 @@ def build_equity_curve(
             nav_before_trade = float(active_trade["nav_before_trade"])
             sell_date = cast(
                 pd.Timestamp, pd.Timestamp(active_trade["sell_date"])
-            ).normalize()
+            )
+            sell_date = sell_date.normalize() if is_daily else sell_date
 
             day_close = close_lookup.get((stock_code, current_date), active_last_close)
             if day_close is not None:
@@ -352,7 +450,8 @@ def build_equity_curve(
                 fill = trade_state["fills"][trade_state["fill_idx"]]
                 fill_date = cast(
                     pd.Timestamp, pd.Timestamp(fill["sell_date"])
-                ).normalize()
+                )
+                fill_date = fill_date.normalize() if is_daily else fill_date
                 if fill_date != current_date:
                     break
                 fill_weight = float(fill["weight"])

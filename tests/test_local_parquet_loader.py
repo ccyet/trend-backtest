@@ -164,3 +164,44 @@ def test_local_parquet_loader_uses_timeframe_resolved_root(tmp_path: Path):
 
     assert len(out) == 2
     assert out["stock_code"].iloc[0] == "000001.SZ"
+    assert list(out["date"]) == [
+        pd.Timestamp("2024-01-02 10:00:00"),
+        pd.Timestamp("2024-01-02 10:30:00"),
+    ]
+
+
+def test_local_parquet_loader_prefers_inventory_symbols_when_stock_pool_empty(tmp_path: Path, monkeypatch):
+    import pytest
+
+    pytest.importorskip("pyarrow")
+    intraday_root = tmp_path / "market" / "5m"
+    qfq = intraday_root / "qfq"
+    qfq.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        {
+            "date": ["2024-01-02 10:00:00"],
+            "symbol": ["000777.SZ"],
+            "open": [10.0],
+            "high": [10.1],
+            "low": [9.9],
+            "close": [10.0],
+            "volume": [10],
+        }
+    ).to_parquet(qfq / "000777.SZ.parquet", index=False)
+
+    monkeypatch.setattr(
+        "data_loader.list_local_symbols_by_timeframe",
+        lambda timeframe, adjust=None: ["000777.SZ"] if timeframe == "5m" and adjust == "qfq" else [],
+    )
+
+    out = load_local_parquet_data(
+        "2024-01-02",
+        "2024-01-02",
+        stock_codes=(),
+        local_data_root=str(tmp_path / "market" / "daily"),
+        adjust="qfq",
+        timeframe="5m",
+    )
+
+    assert out["stock_code"].tolist() == ["000777.SZ"]

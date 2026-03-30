@@ -8,11 +8,13 @@ from typing import Any, cast
 
 import pandas as pd
 
+from data.services.local_inventory_service import list_local_symbols_by_timeframe
+
 
 REQUIRED_COLUMNS = ("date", "stock_code", "open", "high", "low", "close")
 OPTIONAL_COLUMNS = ("volume",)
 SUPPORTED_FILE_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
-TIMEFRAME_DIR_NAMES = {"1d": "daily", "30m": "30m", "15m": "15m"}
+TIMEFRAME_DIR_NAMES = {"1d": "daily", "30m": "30m", "15m": "15m", "5m": "5m"}
 
 COLUMN_ALIASES = {
     "date": ("date", "trade_date", "trading_date", "trade_dt", "日期", "交易日期", "交易日"),
@@ -40,9 +42,10 @@ def quote_ident(name: str) -> str:
     return f'"{name.replace(chr(34), chr(34) * 2)}"'
 
 
-def parse_trade_dates(series: pd.Series) -> pd.Series:
+def parse_trade_dates(series: pd.Series, *, normalize_to_day: bool = True) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(series):
-        return pd.to_datetime(series, errors="coerce").dt.normalize()
+        parsed = pd.to_datetime(series, errors="coerce")
+        return parsed.dt.normalize() if normalize_to_day else parsed
 
     raw = series.astype(str).str.strip()
     parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
@@ -83,7 +86,7 @@ def parse_trade_dates(series: pd.Series) -> pd.Series:
     if remaining_mask.any():
         parsed.loc[remaining_mask] = pd.to_datetime(raw.loc[remaining_mask], errors="coerce")
 
-    return parsed.dt.normalize()
+    return parsed.dt.normalize() if normalize_to_day else parsed
 
 
 def _resolve_existing_columns(
@@ -147,6 +150,7 @@ def _normalize_loaded_data(
     stock_codes: tuple[str, ...] | None,
     lookback_days: int,
     lookahead_days: int,
+    normalize_to_day: bool = True,
 ) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=pd.Index(REQUIRED_COLUMNS + OPTIONAL_COLUMNS))
@@ -157,7 +161,10 @@ def _normalize_loaded_data(
             renamed[column] = pd.NA
 
     normalized = renamed[list(REQUIRED_COLUMNS + OPTIONAL_COLUMNS)].copy()
-    normalized["date"] = parse_trade_dates(cast(pd.Series, normalized["date"]))
+    normalized["date"] = parse_trade_dates(
+        cast(pd.Series, normalized["date"]),
+        normalize_to_day=normalize_to_day,
+    )
     for column in ("open", "high", "low", "close", "volume"):
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
 
@@ -166,7 +173,9 @@ def _normalize_loaded_data(
     normalized = normalized.loc[required_mask]
 
     query_start, query_end = _calculate_query_window(start_date, end_date, lookback_days, lookahead_days)
-    mask = (normalized["date"] >= query_start.normalize()) & (normalized["date"] <= query_end.normalize())
+    query_start_ts = query_start.normalize()
+    query_end_ts = query_end.normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    mask = (normalized["date"] >= query_start_ts) & (normalized["date"] <= query_end_ts)
     normalized = normalized.loc[mask]
 
     normalized_codes = tuple(code.strip().upper() for code in (stock_codes or ()) if code.strip())
@@ -508,16 +517,10 @@ def load_stock_data(
 
 
 
-def _list_local_symbols(local_data_root: Path, adjust: str) -> list[str]:
-    metadata_path = local_data_root.parent / "metadata" / "symbols.parquet"
-    if metadata_path.exists():
-        try:
-            meta = pd.read_parquet(metadata_path)
-            if "symbol" in meta.columns:
-                values = meta["symbol"].astype(str).str.strip().str.upper().tolist()
-                return sorted([item for item in values if item])
-        except Exception:
-            pass
+def _list_local_symbols(local_data_root: Path, adjust: str, timeframe: str) -> list[str]:
+    inventory_symbols = list_local_symbols_by_timeframe(timeframe=timeframe, adjust=adjust)
+    if inventory_symbols:
+        return inventory_symbols
 
     adjust_dir = local_data_root / adjust
     if not adjust_dir.exists():
@@ -541,7 +544,7 @@ def load_local_parquet_data(
         raise FileNotFoundError(f"本地数据目录不存在：{adjust_dir}")
 
     normalized_codes = tuple(code.strip().upper() for code in (stock_codes or ()) if code.strip())
-    symbols = list(normalized_codes) if normalized_codes else _list_local_symbols(root, adjust)
+    symbols = list(normalized_codes) if normalized_codes else _list_local_symbols(root, adjust, timeframe)
     if not symbols:
         raise ValueError("本地 parquet 未找到可用股票数据。")
 
@@ -579,6 +582,7 @@ def load_local_parquet_data(
         stock_codes=stock_codes,
         lookback_days=lookback_days,
         lookahead_days=lookahead_days,
+        normalize_to_day=(timeframe == "1d"),
     )
     if normalized.empty:
         raise ValueError("本地 parquet 过滤后无可用数据，请检查回测区间或股票池。")

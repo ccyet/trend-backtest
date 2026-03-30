@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+import importlib
+import re
+from typing import Any, Callable, cast
 
 import pandas as pd
 
@@ -9,6 +11,8 @@ import pandas as pd
 @dataclass(frozen=True)
 class AkshareProvider:
     """akshare 调用封装层（仅此模块允许直接依赖 akshare）。"""
+
+    MINUTE_PERIOD_MAP = {"5m": "5", "15m": "15", "30m": "30"}
 
     @staticmethod
     def to_standard_symbol(raw_symbol: str) -> str:
@@ -65,7 +69,28 @@ class AkshareProvider:
 
     @staticmethod
     def _empty_bars() -> pd.DataFrame:
-        return pd.DataFrame(columns=["date", "symbol", "open", "high", "low", "close", "volume", "amount"])
+        return pd.DataFrame(columns=pd.Index(["date", "symbol", "open", "high", "low", "close", "volume", "amount"]))
+
+    @staticmethod
+    def _import_akshare() -> Any:
+        return importlib.import_module("akshare")
+
+    @staticmethod
+    def _has_explicit_time(date_text: str) -> bool:
+        return bool(re.search(r"\d{1,2}:\d{2}", str(date_text).strip()))
+
+    @staticmethod
+    def _build_filter_window(start_date: str, end_date: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+        start_ts = cast(pd.Timestamp, pd.Timestamp(pd.to_datetime(start_date)))
+        end_ts = cast(pd.Timestamp, pd.Timestamp(pd.to_datetime(end_date)))
+        if not AkshareProvider._has_explicit_time(start_date):
+            start_ts = cast(pd.Timestamp, start_ts.normalize())
+        if not AkshareProvider._has_explicit_time(end_date):
+            end_ts = cast(
+                pd.Timestamp,
+                end_ts.normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1),
+            )
+        return start_ts, end_ts
 
     @staticmethod
     def _normalize_bars(raw_df: pd.DataFrame, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -74,12 +99,15 @@ class AkshareProvider:
 
         mapping = {
             "日期": "date",
+            "时间": "date",
+            "日期时间": "date",
             "开盘": "open",
             "最高": "high",
             "最低": "low",
             "收盘": "close",
             "成交量": "volume",
             "成交额": "amount",
+            "datetime": "date",
             "date": "date",
             "open": "open",
             "high": "high",
@@ -92,27 +120,38 @@ class AkshareProvider:
         out = raw_df.rename(columns=mapping).copy()
         if "date" not in out.columns:
             out = out.reset_index()
-            out = out.rename(columns={out.columns[0]: "date"})
+            first_column = str(out.columns[0])
+            out = out.rename(columns={first_column: "date"})
 
         out["date"] = pd.to_datetime(out["date"], errors="coerce")
-        start_ts = pd.to_datetime(start_date)
-        end_ts = pd.to_datetime(end_date)
+        start_ts, end_ts = AkshareProvider._build_filter_window(start_date, end_date)
         out = out[out["date"].between(start_ts, end_ts)]
 
         for required in ["open", "high", "low", "close", "volume", "amount"]:
             if required not in out.columns:
                 out[required] = pd.NA
+            out[required] = pd.to_numeric(out[required], errors="coerce")
 
         out["symbol"] = AkshareProvider.to_standard_symbol(symbol)
-        return out[["date", "symbol", "open", "high", "low", "close", "volume", "amount"]].reset_index(drop=True)
+        selected = cast(pd.DataFrame, out[["date", "symbol", "open", "high", "low", "close", "volume", "amount"]].copy())
+        return cast(pd.DataFrame, selected.reset_index(drop=True))
+
+    @staticmethod
+    def _format_minute_api_datetime(date_text: str, *, is_end: bool) -> str:
+        ts = cast(pd.Timestamp, pd.Timestamp(pd.to_datetime(date_text)))
+        if not AkshareProvider._has_explicit_time(date_text):
+            ts = cast(pd.Timestamp, ts.normalize())
+            if is_end:
+                ts = cast(pd.Timestamp, ts + pd.Timedelta(hours=23, minutes=59, seconds=59))
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
     def fetch_symbol_list() -> pd.DataFrame:
-        import akshare as ak
+        ak = AkshareProvider._import_akshare()
 
         df = ak.stock_info_a_code_name()
         if df.empty:
-            return pd.DataFrame(columns=["symbol", "name"])
+            return pd.DataFrame(columns=pd.Index(["symbol", "name"]))
 
         renamed = df.rename(columns={"code": "raw_code", "name": "name"}).copy()
         renamed["symbol"] = renamed["raw_code"].map(AkshareProvider.to_standard_symbol)
@@ -202,6 +241,29 @@ class AkshareProvider:
         )
 
     @staticmethod
+    def _fetch_minute_from_eastmoney(
+        ak: Any,
+        symbol: str,
+        timeframe: str,
+        start_date: str,
+        end_date: str,
+        adjust: str,
+    ) -> pd.DataFrame:
+        period = AkshareProvider.MINUTE_PERIOD_MAP.get(timeframe)
+        if period is None:
+            raise ValueError(f"不支持的分钟周期: {timeframe}")
+        if not hasattr(ak, "stock_zh_a_hist_min_em"):
+            raise AttributeError("akshare 不存在 stock_zh_a_hist_min_em")
+
+        return ak.stock_zh_a_hist_min_em(
+            symbol=AkshareProvider.to_akshare_symbol(symbol),
+            period=period,
+            adjust=adjust,
+            start_date=AkshareProvider._format_minute_api_datetime(start_date, is_end=False),
+            end_date=AkshareProvider._format_minute_api_datetime(end_date, is_end=True),
+        )
+
+    @staticmethod
     def _resolve_sources(
         symbol: str,
     ) -> list[tuple[str, Callable[[Any, str, str, str, str], pd.DataFrame]]]:
@@ -228,7 +290,7 @@ class AkshareProvider:
 
     @staticmethod
     def fetch_daily_bars(symbol: str, start_date: str, end_date: str, adjust: str = "qfq") -> pd.DataFrame:
-        import akshare as ak
+        ak = AkshareProvider._import_akshare()
 
         errors: list[str] = []
         sources = AkshareProvider._resolve_sources(symbol)
@@ -248,3 +310,39 @@ class AkshareProvider:
             source_names = "->".join(source_name for source_name, _ in sources)
             raise RuntimeError(f"日线下载失败，已尝试{source_names}: " + " | ".join(errors))
         return AkshareProvider._empty_bars()
+
+    @staticmethod
+    def fetch_bars(
+        symbol: str,
+        timeframe: str,
+        start_date: str,
+        end_date: str,
+        adjust: str = "qfq",
+    ) -> pd.DataFrame:
+        if timeframe == "1d":
+            return AkshareProvider.fetch_daily_bars(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+            )
+
+        if timeframe not in AkshareProvider.MINUTE_PERIOD_MAP:
+            raise ValueError("timeframe 仅支持 1d、30m、15m、5m。")
+
+        start_ts, end_ts = AkshareProvider._build_filter_window(start_date, end_date)
+        max_supported_span = pd.Timedelta(days=7)
+        if end_ts - start_ts > max_supported_span:
+            raise ValueError("AKShare 分钟接口当前仅适合近 5 个交易日窗口，请缩小更新时间范围。")
+
+        ak = AkshareProvider._import_akshare()
+
+        raw_df = AkshareProvider._fetch_minute_from_eastmoney(
+            ak=ak,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_date=start_date,
+            end_date=end_date,
+            adjust=adjust,
+        )
+        return AkshareProvider._normalize_bars(raw_df, symbol, start_date, end_date)

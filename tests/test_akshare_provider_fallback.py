@@ -124,3 +124,51 @@ def test_fetch_daily_bars_routes_index_to_index_hist_with_volume(monkeypatch):
     assert calls == ["index"]
     assert result["symbol"].iloc[0] == "000852.SH"
     assert result["volume"].tolist() == [123456789.0, 223456789.0]
+
+
+def test_fetch_bars_routes_minute_timeframe_and_keeps_timestamp(monkeypatch):
+    fake_ak = SimpleNamespace(
+        stock_zh_a_hist_min_em=lambda **kwargs: pd.DataFrame(
+            {
+                "时间": ["2024-01-02 10:00:00", "2024-01-02 10:05:00"],
+                "开盘": [1.0, 1.1],
+                "最高": [1.2, 1.3],
+                "最低": [0.9, 1.0],
+                "收盘": [1.1, 1.2],
+                "成交量": [100.0, 120.0],
+                "成交额": [1000.0, 1200.0],
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "akshare", fake_ak)
+
+    result = AkshareProvider.fetch_bars(
+        "000001.SZ",
+        "5m",
+        "2024-01-02",
+        "2024-01-02",
+        adjust="qfq",
+    )
+
+    assert result["date"].tolist() == [
+        pd.Timestamp("2024-01-02 10:00:00"),
+        pd.Timestamp("2024-01-02 10:05:00"),
+    ]
+    assert result["symbol"].iloc[0] == "000001.SZ"
+
+
+def test_fetch_bars_rejects_too_wide_minute_window():
+    try:
+        AkshareProvider.fetch_bars(
+            "000001.SZ",
+            "5m",
+            "2024-01-01",
+            "2024-01-20",
+            adjust="qfq",
+        )
+        raised = False
+    except ValueError as exc:
+        raised = True
+        assert "近 5 个交易日窗口" in str(exc)
+
+    assert raised

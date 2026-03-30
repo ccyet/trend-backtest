@@ -133,3 +133,34 @@ def test_other_display_formatters_compact_numeric_values() -> None:
     assert log_record["结束日期"] == "2024-01-31"
     assert log_record["更新时间"] == "2024-02-01 09:30"
     assert log_record["更新行数"] == "123,456"
+
+
+def test_format_detail_for_display_keeps_intraday_time_text() -> None:
+    app = _load_app_module()
+
+    detail = pd.DataFrame(
+        {
+            "date": ["2024-01-01 10:05:00"],
+            "sell_date": ["2024-01-01 10:55:00"],
+            "stock_code": ["000001.SZ"],
+            "prev_close": [10.0],
+            "prev_high": [10.2],
+            "prev_low": [9.8],
+            "open": [10.1],
+            "close": [10.2],
+            "buy_price": [10.1],
+            "sell_price": [10.3],
+            "gap_pct_vs_prev_close": [1.0],
+            "net_return_pct": [1.0],
+            "volume": [1000.0],
+            "holding_days": [1],
+            "fill_count": [1],
+            "win_flag": [1],
+            "entry_reason": ["early_surge_high_base.up"],
+            "exit_reason": ["time_exit: 时间退出触发"],
+        }
+    )
+
+    record = app.format_detail_for_display(detail).to_dict("records")[0]
+    assert record["信号日期"] == "2024-01-01 10:05"
+    assert record["卖出日期"] == "2024-01-01 10:55"
