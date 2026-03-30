@@ -12,7 +12,13 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from analyzer import analyze_all_stocks, run_parameter_scan
+from analyzer import (
+    analyze_all_stocks,
+    build_drawdown_diagnostics,
+    build_trade_anomaly_queue,
+    build_trade_behavior_overview,
+    run_parameter_scan,
+)
 from data_loader import (
     describe_file_source,
     describe_tables,
@@ -46,6 +52,10 @@ RESULT_STATE_KEYS = [
     "detail_df",
     "daily_df",
     "equity_df",
+    "trade_behavior_df",
+    "drawdown_episodes_df",
+    "drawdown_contributors_df",
+    "anomaly_queue_df",
     "stats",
     "scan_df",
     "scan_metric",
@@ -82,6 +92,36 @@ SUMMARY_PERCENT_COLUMNS = [
     "median_net_return_pct",
 ]
 EQUITY_PERCENT_COLUMNS = ["drawdown_pct"]
+TRADE_BEHAVIOR_PERCENT_COLUMNS = [
+    "win_rate_pct",
+    "avg_net_return_pct",
+    "median_net_return_pct",
+    "avg_mfe_pct",
+    "avg_mae_pct",
+    "avg_give_back_pct",
+    "avg_mfe_capture_pct",
+    "trigger_fill_share_pct",
+    "multi_fill_trade_share_pct",
+]
+TRADE_BEHAVIOR_NUMBER_COLUMNS = ["executed_trades", "avg_profit_drawdown_ratio"]
+DD_EPISODE_PERCENT_COLUMNS = ["peak_to_trough_pct", "worst_trade_return_pct"]
+DD_EPISODE_COUNT_COLUMNS = ["episode_no", "underwater_bars", "trade_count"]
+DD_CONTRIBUTOR_PERCENT_COLUMNS = [
+    "avg_net_return_pct",
+    "total_net_return_pct",
+    "avg_mae_pct",
+    "avg_mfe_pct",
+]
+DD_CONTRIBUTOR_COUNT_COLUMNS = ["trade_count"]
+ANOMALY_PERCENT_COLUMNS = [
+    "activation_threshold_pct",
+    "threshold_excess_pct",
+    "holding_anchor_mfe_pct",
+    "holding_anchor_mae_pct",
+    "give_back_pct",
+    "net_return_pct",
+]
+ANOMALY_NUMBER_COLUMNS = ["severity_score", "trade_no", "holding_days"]
 SCAN_FIELD_LABELS = {
     "gap_pct": "跳空幅度",
     "max_gap_filter_pct": "最大高开/低开过滤",
@@ -110,9 +150,11 @@ SCAN_FIELD_LABELS = {
     "stop_loss_pct": "全仓止损",
     "take_profit_pct": "固定止盈",
     "profit_drawdown_pct": "盈利回撤",
+    "min_profit_to_activate_profit_drawdown_pct": "盈利回撤激活浮盈",
     "exit_ma_period": "离场均线周期",
     "atr_trailing_period": "ATR跟踪周期",
     "atr_trailing_multiplier": "ATR跟踪倍数",
+    "min_profit_to_activate_atr_trailing_pct": "ATR跟踪激活浮盈",
     "buy_slippage_pct": "买入滑点",
     "sell_slippage_pct": "卖出滑点",
     "partial_rule_1_target_profit_pct": "第1批目标收益",
@@ -266,8 +308,10 @@ FACTOR_CONTROL_DEFAULTS: dict[str, str | int | float] = {
     "atr_filter_period": 14,
     "min_atr_filter_pct": 0.0,
     "max_atr_filter_pct": 100.0,
+    "min_profit_to_activate_profit_drawdown_pct": 5.0,
     "atr_trailing_period": 14,
     "atr_trailing_multiplier": 3.0,
+    "min_profit_to_activate_atr_trailing_pct": 5.0,
 }
 SCAN_AXIS_STATE_KEYS = (
     ("scan_axis_1_field", "scan_axis_1_values"),
@@ -286,6 +330,56 @@ EQUITY_COLUMN_LABELS = {
     "date": "日期",
     "net_value": "净值",
     "drawdown_pct": "回撤",
+}
+TRADE_BEHAVIOR_COLUMN_LABELS = {
+    "executed_trades": "交易笔数",
+    "win_rate_pct": "胜率",
+    "avg_net_return_pct": "平均净收益率",
+    "median_net_return_pct": "净收益率中位数",
+    "avg_mfe_pct": "平均最大有利波动",
+    "avg_mae_pct": "平均最大不利波动",
+    "avg_give_back_pct": "平均利润回吐",
+    "avg_mfe_capture_pct": "平均 MFE 兑现率",
+    "trigger_fill_share_pct": "触发成交占比",
+    "multi_fill_trade_share_pct": "多批成交占比",
+    "avg_profit_drawdown_ratio": "平均利润回撤比",
+}
+DD_EPISODE_COLUMN_LABELS = {
+    "episode_no": "回撤段编号",
+    "drawdown_start_date": "回撤开始",
+    "trough_date": "回撤谷值",
+    "recovery_date": "恢复日期",
+    "peak_to_trough_pct": "峰谷回撤",
+    "underwater_bars": "水下周期数",
+    "trade_count": "涉及交易数",
+    "worst_trade_return_pct": "最差单笔收益",
+    "dominant_entry_reason": "主导开仓原因",
+    "recovered_flag": "是否恢复",
+}
+DD_CONTRIBUTOR_COLUMN_LABELS = {
+    "entry_reason": "开仓原因",
+    "trade_count": "交易数",
+    "avg_net_return_pct": "平均净收益率",
+    "total_net_return_pct": "累计净收益率",
+    "avg_mae_pct": "平均最大不利波动",
+    "avg_mfe_pct": "平均最大有利波动",
+}
+ANOMALY_COLUMN_LABELS = {
+    "anomaly_type": "异常类型",
+    "severity_score": "严重度",
+    "trade_no": "交易编号",
+    "date": "信号日期",
+    "stock_code": "股票代码",
+    "holding_days": "持有天数",
+    "activation_threshold_pct": "激发阈值",
+    "threshold_excess_pct": "超阈值幅度",
+    "holding_anchor_mfe_pct": "日均最大浮盈",
+    "holding_anchor_mae_pct": "日均最大不利波动",
+    "give_back_pct": "利润回吐",
+    "net_return_pct": "净收益率",
+    "entry_reason": "开仓原因",
+    "exit_reason": "离场原因",
+    "anomaly_note": "诊断说明",
 }
 UPDATE_LOG_COLUMN_LABELS = {
     "symbol": "股票代码",
@@ -830,6 +924,112 @@ def format_equity_for_display(equity_df: pd.DataFrame) -> pd.DataFrame:
     return display_df
 
 
+def format_trade_behavior_for_display(behavior_df: pd.DataFrame) -> pd.DataFrame:
+    if behavior_df.empty:
+        return behavior_df
+
+    display_df = behavior_df.copy()
+    for column in TRADE_BEHAVIOR_PERCENT_COLUMNS:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(format_percent)
+    for column in TRADE_BEHAVIOR_NUMBER_COLUMNS:
+        if column in display_df.columns:
+            formatter = (
+                format_number
+                if column != "executed_trades"
+                else lambda value: f"{int(value):,}" if pd.notna(value) else ""
+            )
+            display_df[column] = display_df[column].map(formatter)
+    return display_df.rename(
+        columns={
+            column: TRADE_BEHAVIOR_COLUMN_LABELS[column]
+            for column in display_df.columns
+            if column in TRADE_BEHAVIOR_COLUMN_LABELS
+        }
+    )
+
+
+def format_drawdown_episodes_for_display(episodes_df: pd.DataFrame) -> pd.DataFrame:
+    if episodes_df.empty:
+        return episodes_df
+
+    display_df = episodes_df.copy()
+    for column in ("drawdown_start_date", "trough_date", "recovery_date"):
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(format_timestamp_for_display)
+    for column in DD_EPISODE_PERCENT_COLUMNS:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(format_percent)
+    for column in DD_EPISODE_COUNT_COLUMNS:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(
+                lambda value: f"{int(value):,}" if pd.notna(value) else ""
+            )
+    if "recovered_flag" in display_df.columns:
+        display_df["recovered_flag"] = display_df["recovered_flag"].map(
+            lambda value: "是" if bool(value) else "否"
+        )
+    return display_df.rename(
+        columns={
+            column: DD_EPISODE_COLUMN_LABELS[column]
+            for column in display_df.columns
+            if column in DD_EPISODE_COLUMN_LABELS
+        }
+    )
+
+
+def format_drawdown_contributors_for_display(
+    contributors_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if contributors_df.empty:
+        return contributors_df
+
+    display_df = contributors_df.copy()
+    for column in DD_CONTRIBUTOR_PERCENT_COLUMNS:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(format_percent)
+    for column in DD_CONTRIBUTOR_COUNT_COLUMNS:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(
+                lambda value: f"{int(value):,}" if pd.notna(value) else ""
+            )
+    return display_df.rename(
+        columns={
+            column: DD_CONTRIBUTOR_COLUMN_LABELS[column]
+            for column in display_df.columns
+            if column in DD_CONTRIBUTOR_COLUMN_LABELS
+        }
+    )
+
+
+def format_anomaly_queue_for_display(anomaly_df: pd.DataFrame) -> pd.DataFrame:
+    if anomaly_df.empty:
+        return anomaly_df
+
+    display_df = anomaly_df.copy()
+    if "date" in display_df.columns:
+        display_df["date"] = display_df["date"].map(format_timestamp_for_display)
+    for column in ANOMALY_PERCENT_COLUMNS:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(format_percent)
+    for column in ANOMALY_NUMBER_COLUMNS:
+        if column in display_df.columns:
+            digits = 2 if column == "severity_score" else 0
+            formatter = (
+                (lambda value: format_number(value, digits=2))
+                if column == "severity_score"
+                else (lambda value: f"{int(value):,}" if pd.notna(value) else "")
+            )
+            display_df[column] = display_df[column].map(formatter)
+    return display_df.rename(
+        columns={
+            column: ANOMALY_COLUMN_LABELS[column]
+            for column in display_df.columns
+            if column in ANOMALY_COLUMN_LABELS
+        }
+    )
+
+
 def build_download_name(start_date: str, end_date: str) -> str:
     return f"gap_analysis_{start_date}_{end_date}.xlsx"
 
@@ -895,9 +1095,11 @@ def format_scan_for_display(scan_df: pd.DataFrame) -> pd.DataFrame:
             "stop_loss_pct",
             "take_profit_pct",
             "profit_drawdown_pct",
+            "min_profit_to_activate_profit_drawdown_pct",
             "exit_ma_period",
             "atr_trailing_period",
             "atr_trailing_multiplier",
+            "min_profit_to_activate_atr_trailing_pct",
             "buy_slippage_pct",
             "sell_slippage_pct",
             "partial_rule_1_target_profit_pct",
@@ -1034,6 +1236,80 @@ def build_equity_column_config() -> dict[str, object]:
     }
 
 
+def build_trade_behavior_column_config() -> dict[str, object]:
+    return {
+        "交易笔数": st.column_config.TextColumn("交易笔数", width="small"),
+        "胜率": st.column_config.TextColumn("胜率", width="small"),
+        "平均净收益率": st.column_config.TextColumn("平均净收益率", width="small"),
+        "净收益率中位数": st.column_config.TextColumn("净收益率中位数", width="small"),
+        "平均最大有利波动": st.column_config.TextColumn(
+            "平均最大有利波动", width="small"
+        ),
+        "平均最大不利波动": st.column_config.TextColumn(
+            "平均最大不利波动", width="small"
+        ),
+        "平均利润回吐": st.column_config.TextColumn("平均利润回吐", width="small"),
+        "平均 MFE 兑现率": st.column_config.TextColumn(
+            "平均 MFE 兑现率", width="small"
+        ),
+        "触发成交占比": st.column_config.TextColumn("触发成交占比", width="small"),
+        "多批成交占比": st.column_config.TextColumn("多批成交占比", width="small"),
+        "平均利润回撤比": st.column_config.TextColumn("平均利润回撤比", width="small"),
+    }
+
+
+def build_drawdown_episode_column_config() -> dict[str, object]:
+    return {
+        "回撤段编号": st.column_config.TextColumn("回撤段编号", width="small"),
+        "回撤开始": st.column_config.TextColumn("回撤开始", width="medium"),
+        "回撤谷值": st.column_config.TextColumn("回撤谷值", width="medium"),
+        "恢复日期": st.column_config.TextColumn("恢复日期", width="medium"),
+        "峰谷回撤": st.column_config.TextColumn("峰谷回撤", width="small"),
+        "水下周期数": st.column_config.TextColumn("水下周期数", width="small"),
+        "涉及交易数": st.column_config.TextColumn("涉及交易数", width="small"),
+        "最差单笔收益": st.column_config.TextColumn("最差单笔收益", width="small"),
+        "主导开仓原因": st.column_config.TextColumn("主导开仓原因", width="medium"),
+        "是否恢复": st.column_config.TextColumn("是否恢复", width="small"),
+    }
+
+
+def build_drawdown_contributor_column_config() -> dict[str, object]:
+    return {
+        "开仓原因": st.column_config.TextColumn("开仓原因", width="medium"),
+        "交易数": st.column_config.TextColumn("交易数", width="small"),
+        "平均净收益率": st.column_config.TextColumn("平均净收益率", width="small"),
+        "累计净收益率": st.column_config.TextColumn("累计净收益率", width="small"),
+        "平均最大不利波动": st.column_config.TextColumn(
+            "平均最大不利波动", width="small"
+        ),
+        "平均最大有利波动": st.column_config.TextColumn(
+            "平均最大有利波动", width="small"
+        ),
+    }
+
+
+def build_anomaly_queue_column_config() -> dict[str, object]:
+    return {
+        "异常类型": st.column_config.TextColumn("异常类型", width="small"),
+        "严重度": st.column_config.TextColumn("严重度", width="small"),
+        "交易编号": st.column_config.TextColumn("交易编号", width="small"),
+        "信号日期": st.column_config.TextColumn("信号日期", width="medium"),
+        "股票代码": st.column_config.TextColumn("股票代码", width="small"),
+        "持有天数": st.column_config.TextColumn("持有天数", width="small"),
+        "激发阈值": st.column_config.TextColumn("激发阈值", width="small"),
+        "超阈值幅度": st.column_config.TextColumn("超阈值幅度", width="small"),
+        "日均最大浮盈": st.column_config.TextColumn("日均最大浮盈", width="small"),
+        "日均最大不利波动": st.column_config.TextColumn(
+            "日均最大不利波动", width="small"
+        ),
+        "利润回吐": st.column_config.TextColumn("利润回吐", width="small"),
+        "净收益率": st.column_config.TextColumn("净收益率", width="small"),
+        "开仓原因": st.column_config.TextColumn("开仓原因", width="medium"),
+        "离场原因": st.column_config.TextColumn("离场原因", width="medium"),
+        "诊断说明": st.column_config.TextColumn("诊断说明", width="large"),
+    }
+
+
 def build_detail_column_config() -> dict[str, object]:
     return {
         "信号日期": st.column_config.TextColumn("信号日期", width="small"),
@@ -1085,16 +1361,32 @@ def build_scan_column_config() -> dict[str, object]:
         "组合最小累计涨跌幅": st.column_config.TextColumn(
             "组合最小累计涨跌幅", width="small"
         ),
-        "早盘观察窗口K数": st.column_config.TextColumn("早盘观察窗口K数", width="small"),
-        "高位横盘最少K数": st.column_config.TextColumn("高位横盘最少K数", width="small"),
-        "高位横盘最多K数": st.column_config.TextColumn("高位横盘最多K数", width="small"),
-        "早盘冲高最小涨幅": st.column_config.TextColumn("早盘冲高最小涨幅", width="small"),
+        "早盘观察窗口K数": st.column_config.TextColumn(
+            "早盘观察窗口K数", width="small"
+        ),
+        "高位横盘最少K数": st.column_config.TextColumn(
+            "高位横盘最少K数", width="small"
+        ),
+        "高位横盘最多K数": st.column_config.TextColumn(
+            "高位横盘最多K数", width="small"
+        ),
+        "早盘冲高最小涨幅": st.column_config.TextColumn(
+            "早盘冲高最小涨幅", width="small"
+        ),
         "横盘最大回撤": st.column_config.TextColumn("横盘最大回撤", width="small"),
         "横盘最大振幅": st.column_config.TextColumn("横盘最大振幅", width="small"),
-        "锚点跌破次数上限": st.column_config.TextColumn("锚点跌破次数上限", width="small"),
-        "锚点跌破深度上限": st.column_config.TextColumn("锚点跌破深度上限", width="small"),
-        "冲高量能倍数下限": st.column_config.TextColumn("冲高量能倍数下限", width="small"),
-        "突破量能倍数下限": st.column_config.TextColumn("突破量能倍数下限", width="small"),
+        "锚点跌破次数上限": st.column_config.TextColumn(
+            "锚点跌破次数上限", width="small"
+        ),
+        "锚点跌破深度上限": st.column_config.TextColumn(
+            "锚点跌破深度上限", width="small"
+        ),
+        "冲高量能倍数下限": st.column_config.TextColumn(
+            "冲高量能倍数下限", width="small"
+        ),
+        "突破量能倍数下限": st.column_config.TextColumn(
+            "突破量能倍数下限", width="small"
+        ),
         "突破触发缓冲": st.column_config.TextColumn("突破触发缓冲", width="small"),
         "ATR跟踪周期": st.column_config.TextColumn("ATR跟踪周期", width="small"),
         "ATR跟踪倍数": st.column_config.TextColumn("ATR跟踪倍数", width="small"),
@@ -1153,7 +1445,11 @@ def run_local_data_update(
 
 
 def build_export_dir_hint(timeframe: str, adjust: str) -> str:
-    return f"data/market/exports/{adjust}/" if timeframe == "1d" else f"data/market/exports/{timeframe}/{adjust}/"
+    return (
+        f"data/market/exports/{adjust}/"
+        if timeframe == "1d"
+        else f"data/market/exports/{timeframe}/{adjust}/"
+    )
 
 
 def load_update_log_preview(limit: int = 20) -> pd.DataFrame:
@@ -1200,26 +1496,53 @@ def load_update_log_preview(limit: int = 20) -> pd.DataFrame:
 def load_local_inventory_preview(limit: int = 20) -> pd.DataFrame:
     inventory = load_inventory()
     if inventory.empty:
-        return pd.DataFrame(columns=pd.Index(["symbol", "timeframe", "row_count", "date_range", "updated_at", "last_update_status"]))
+        return pd.DataFrame(
+            columns=pd.Index(
+                [
+                    "symbol",
+                    "timeframe",
+                    "row_count",
+                    "date_range",
+                    "updated_at",
+                    "last_update_status",
+                ]
+            )
+        )
     preview = inventory.copy()
     for column in ("min_date", "max_date", "updated_at"):
         if column not in preview.columns:
             preview[column] = pd.NaT
         preview[column] = pd.to_datetime(preview[column], errors="coerce")
+
     def _format_inventory_range(row: pd.Series) -> str:
         min_date = row.get("min_date")
         max_date = row.get("max_date")
         if bool(pd.isna(min_date)) or bool(pd.isna(max_date)):
             return ""
-        min_ts = cast(pd.Timestamp, pd.to_datetime(cast(Any, min_date), errors="coerce"))
-        max_ts = cast(pd.Timestamp, pd.to_datetime(cast(Any, max_date), errors="coerce"))
-        return f"{min_ts.strftime('%Y-%m-%d %H:%M')} → {max_ts.strftime('%Y-%m-%d %H:%M')}"
+        min_ts = cast(
+            pd.Timestamp, pd.to_datetime(cast(Any, min_date), errors="coerce")
+        )
+        max_ts = cast(
+            pd.Timestamp, pd.to_datetime(cast(Any, max_date), errors="coerce")
+        )
+        return (
+            f"{min_ts.strftime('%Y-%m-%d %H:%M')} → {max_ts.strftime('%Y-%m-%d %H:%M')}"
+        )
 
     preview["date_range"] = preview.apply(_format_inventory_range, axis=1)
     preview = preview.sort_values("updated_at", ascending=False)
     return cast(
         pd.DataFrame,
-        preview[["symbol", "timeframe", "row_count", "date_range", "updated_at", "last_update_status"]]
+        preview[
+            [
+                "symbol",
+                "timeframe",
+                "row_count",
+                "date_range",
+                "updated_at",
+                "last_update_status",
+            ]
+        ]
         .head(limit)
         .reset_index(drop=True),
     )
@@ -1230,13 +1553,25 @@ def format_local_inventory_for_display(preview_df: pd.DataFrame) -> pd.DataFrame
         return preview_df
     display_df = preview_df.copy()
     if "row_count" in display_df.columns:
-        display_df["row_count"] = display_df["row_count"].map(lambda value: f"{int(value):,}" if pd.notna(value) else "")
+        display_df["row_count"] = display_df["row_count"].map(
+            lambda value: f"{int(value):,}" if pd.notna(value) else ""
+        )
     if "updated_at" in display_df.columns:
-        display_df["updated_at"] = pd.to_datetime(display_df["updated_at"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
-    return display_df.rename(columns={column: LOCAL_INVENTORY_COLUMN_LABELS[column] for column in display_df.columns if column in LOCAL_INVENTORY_COLUMN_LABELS})
+        display_df["updated_at"] = pd.to_datetime(
+            display_df["updated_at"], errors="coerce"
+        ).dt.strftime("%Y-%m-%d %H:%M")
+    return display_df.rename(
+        columns={
+            column: LOCAL_INVENTORY_COLUMN_LABELS[column]
+            for column in display_df.columns
+            if column in LOCAL_INVENTORY_COLUMN_LABELS
+        }
+    )
 
 
-def _read_sqlite_preview_rows(db_path: str, table_name: str, limit: int = 20) -> pd.DataFrame:
+def _read_sqlite_preview_rows(
+    db_path: str, table_name: str, limit: int = 20
+) -> pd.DataFrame:
     if not db_path.strip() or not table_name.strip():
         return pd.DataFrame()
     with sqlite3.connect(db_path.strip()) as conn:
@@ -1261,7 +1596,9 @@ def _read_file_preview_rows(
         for encoding in encodings:
             try:
                 if file_bytes is not None:
-                    return pd.read_csv(BytesIO(file_bytes), encoding=encoding).head(limit)
+                    return pd.read_csv(BytesIO(file_bytes), encoding=encoding).head(
+                        limit
+                    )
                 if file_path:
                     return pd.read_csv(file_path, encoding=encoding).head(limit)
             except UnicodeDecodeError:
@@ -1270,11 +1607,19 @@ def _read_file_preview_rows(
 
     if file_bytes is not None:
         with pd.ExcelFile(BytesIO(file_bytes)) as workbook:
-            target_sheet = sheet_name.strip() if sheet_name and sheet_name.strip() else workbook.sheet_names[0]
+            target_sheet = (
+                sheet_name.strip()
+                if sheet_name and sheet_name.strip()
+                else workbook.sheet_names[0]
+            )
             return pd.read_excel(workbook, sheet_name=target_sheet).head(limit)
     if file_path:
         with pd.ExcelFile(file_path) as workbook:
-            target_sheet = sheet_name.strip() if sheet_name and sheet_name.strip() else workbook.sheet_names[0]
+            target_sheet = (
+                sheet_name.strip()
+                if sheet_name and sheet_name.strip()
+                else workbook.sheet_names[0]
+            )
             return pd.read_excel(workbook, sheet_name=target_sheet).head(limit)
     return pd.DataFrame()
 
@@ -1283,8 +1628,12 @@ def _resolve_uploaded_file_inputs(
     uploaded_market_file: Any | None,
     input_file_path: str,
 ) -> tuple[bytes | None, str | None, str | None]:
-    uploaded_file_bytes = uploaded_market_file.getvalue() if uploaded_market_file is not None else None
-    uploaded_file_name = uploaded_market_file.name if uploaded_market_file is not None else None
+    uploaded_file_bytes = (
+        uploaded_market_file.getvalue() if uploaded_market_file is not None else None
+    )
+    uploaded_file_name = (
+        uploaded_market_file.name if uploaded_market_file is not None else None
+    )
     normalized_path = input_file_path.strip() or None
     return uploaded_file_bytes, uploaded_file_name, normalized_path
 
@@ -1292,8 +1641,14 @@ def _resolve_uploaded_file_inputs(
 def build_sqlite_probe_payload(db_path: str, selected_table: str) -> dict[str, Any]:
     candidate_tables = list_candidate_tables(db_path)
     overview_df = pd.DataFrame(describe_tables(db_path))
-    resolved_table = selected_table.strip() or (candidate_tables[0] if candidate_tables else "")
-    preview_df = _read_sqlite_preview_rows(db_path, resolved_table, limit=20) if resolved_table else pd.DataFrame()
+    resolved_table = selected_table.strip() or (
+        candidate_tables[0] if candidate_tables else ""
+    )
+    preview_df = (
+        _read_sqlite_preview_rows(db_path, resolved_table, limit=20)
+        if resolved_table
+        else pd.DataFrame()
+    )
     return {
         "candidate_tables": candidate_tables,
         "overview_df": overview_df,
@@ -1309,8 +1664,14 @@ def build_file_probe_payload(
     file_name: str | None,
     sheet_name: str | None,
 ) -> dict[str, Any]:
-    sheet_names = list_file_sheets(file_path=file_path, file_bytes=file_bytes, file_name=file_name)
-    resolved_sheet = sheet_name.strip() if sheet_name and sheet_name.strip() else (sheet_names[0] if sheet_names else None)
+    sheet_names = list_file_sheets(
+        file_path=file_path, file_bytes=file_bytes, file_name=file_name
+    )
+    resolved_sheet = (
+        sheet_name.strip()
+        if sheet_name and sheet_name.strip()
+        else (sheet_names[0] if sheet_names else None)
+    )
     description = describe_file_source(
         file_path=file_path,
         file_bytes=file_bytes,
@@ -1351,15 +1712,23 @@ def build_pre_backtest_source_summary(
             sqlite_payload = build_sqlite_probe_payload(db_path, table_name)
             target = sqlite_payload["selected_table"] or "未识别数据表"
             if not sqlite_payload["overview_df"].empty and target:
-                matched = sqlite_payload["overview_df"].loc[sqlite_payload["overview_df"]["table_name"] == target]
-                auto_detected = str(matched.iloc[0]["auto_detected"]) if not matched.empty else "未探测"
+                matched = sqlite_payload["overview_df"].loc[
+                    sqlite_payload["overview_df"]["table_name"] == target
+                ]
+                auto_detected = (
+                    str(matched.iloc[0]["auto_detected"])
+                    if not matched.empty
+                    else "未探测"
+                )
             else:
                 auto_detected = "未探测"
         except Exception:
             target = table_name.strip() or Path(db_path).name or "未识别数据表"
             auto_detected = "未探测"
     elif data_source_label == "Excel/CSV 文件":
-        file_bytes, file_name, file_path = _resolve_uploaded_file_inputs(uploaded_market_file, input_file_path)
+        file_bytes, file_name, file_path = _resolve_uploaded_file_inputs(
+            uploaded_market_file, input_file_path
+        )
         target = file_name or (Path(file_path).name if file_path else "待选择文件")
         try:
             file_payload = build_file_probe_payload(
@@ -1371,17 +1740,21 @@ def build_pre_backtest_source_summary(
             resolved_sheet = file_payload["resolved_sheet"]
             if resolved_sheet:
                 target = f"{target} / {resolved_sheet}"
-            auto_detected = "是" if bool(file_payload["description"].get("auto_detected")) else "否"
+            auto_detected = (
+                "是" if bool(file_payload["description"].get("auto_detected")) else "否"
+            )
         except Exception:
             auto_detected = "未探测"
     return pd.DataFrame(
-        [{
-            "数据源类型": data_source_label,
-            "timeframe": timeframe,
-            "adjust": adjust_label,
-            "当前表/文件/sheet": target,
-            "是否自动识别成功": auto_detected,
-        }]
+        [
+            {
+                "数据源类型": data_source_label,
+                "timeframe": timeframe,
+                "adjust": adjust_label,
+                "当前表/文件/sheet": target,
+                "是否自动识别成功": auto_detected,
+            }
+        ]
     )
 
 
@@ -1475,7 +1848,10 @@ with st.expander("本地行情更新（离线下载）", expanded=False):
         )
     with up_c3:
         update_timeframe = st.selectbox(
-            "更新周期", options=list(TIMEFRAME_OPTIONS), index=0, key="offline_update_timeframe"
+            "更新周期",
+            options=list(TIMEFRAME_OPTIONS),
+            index=0,
+            key="offline_update_timeframe",
         )
         update_adjust = st.selectbox(
             "更新复权方式", options=["qfq", "hfq"], index=0, key="offline_update_adjust"
@@ -1501,11 +1877,15 @@ with st.expander("本地行情更新（离线下载）", expanded=False):
             st.success("本地数据更新完成")
         else:
             st.error("本地数据更新失败")
-        st.caption(f"导出目录：{build_export_dir_hint(str(update_timeframe), str(update_adjust))}")
+        st.caption(
+            f"导出目录：{build_export_dir_hint(str(update_timeframe), str(update_adjust))}"
+        )
         if output:
             st.code(output)
 
-    st.caption("分钟级数据已支持 30m / 15m / 5m 更新；当前策略执行与展示仍以现有模型约束为主。")
+    st.caption(
+        "分钟级数据已支持 30m / 15m / 5m 更新；当前策略执行与展示仍以现有模型约束为主。"
+    )
 
     preview = load_update_log_preview(limit=20)
     if not preview.empty:
@@ -1573,7 +1953,9 @@ timeframe = st.sidebar.selectbox(
     index=0,
     key="timeframe",
 )
-st.sidebar.caption("1d 为常规日线；early_surge_high_base 使用 30m 形态并自动切换到 5m 执行。")
+st.sidebar.caption(
+    "1d 为常规日线；early_surge_high_base 使用 30m 形态并自动切换到 5m 执行。"
+)
 
 # 数据源输入（仍放侧边栏，保持小白可见）
 default_db_path = str(Path.cwd() / "market_data.sqlite")
@@ -1595,15 +1977,28 @@ with st.sidebar.expander(
         table_name = st.text_input("表名（可选）", value="", key="sqlite_table_name")
         if st.button("探测数据表", key="sqlite_probe_tables"):
             try:
-                st.session_state["sqlite_probe_payload"] = build_sqlite_probe_payload(db_path, table_name)
+                st.session_state["sqlite_probe_payload"] = build_sqlite_probe_payload(
+                    db_path, table_name
+                )
                 if st.session_state["sqlite_probe_payload"]["selected_table"]:
-                    st.session_state["sqlite_table_name"] = st.session_state["sqlite_probe_payload"]["selected_table"]
+                    st.session_state["sqlite_table_name"] = st.session_state[
+                        "sqlite_probe_payload"
+                    ]["selected_table"]
             except Exception as exc:
                 st.error(f"数据表探测失败：{exc}")
         sqlite_probe_payload = st.session_state.get("sqlite_probe_payload")
-        if isinstance(sqlite_probe_payload, dict) and sqlite_probe_payload.get("candidate_tables"):
+        if isinstance(sqlite_probe_payload, dict) and sqlite_probe_payload.get(
+            "candidate_tables"
+        ):
             candidate_options = list(sqlite_probe_payload["candidate_tables"])
-            default_index = candidate_options.index(st.session_state.get("sqlite_table_name", candidate_options[0])) if st.session_state.get("sqlite_table_name", candidate_options[0]) in candidate_options else 0
+            default_index = (
+                candidate_options.index(
+                    st.session_state.get("sqlite_table_name", candidate_options[0])
+                )
+                if st.session_state.get("sqlite_table_name", candidate_options[0])
+                in candidate_options
+                else 0
+            )
             selected_candidate_table = st.selectbox(
                 "候选数据表",
                 options=candidate_options,
@@ -1617,9 +2012,13 @@ with st.sidebar.expander(
             "上传行情文件", type=["xlsx", "xlsm", "csv"]
         )
         input_file_path = st.text_input("或本地文件路径（可选）", value="")
-        excel_sheet_name = st.text_input("工作表（Excel 可选）", value="", key="excel_sheet_name")
+        excel_sheet_name = st.text_input(
+            "工作表（Excel 可选）", value="", key="excel_sheet_name"
+        )
         if st.button("预览文件结构", key="file_probe_preview"):
-            file_bytes, file_name, file_path = _resolve_uploaded_file_inputs(uploaded_market_file, input_file_path)
+            file_bytes, file_name, file_path = _resolve_uploaded_file_inputs(
+                uploaded_market_file, input_file_path
+            )
             try:
                 st.session_state["file_probe_payload"] = build_file_probe_payload(
                     file_path=file_path,
@@ -1627,17 +2026,30 @@ with st.sidebar.expander(
                     file_name=file_name,
                     sheet_name=excel_sheet_name,
                 )
-                resolved_sheet = st.session_state["file_probe_payload"].get("resolved_sheet")
+                resolved_sheet = st.session_state["file_probe_payload"].get(
+                    "resolved_sheet"
+                )
                 if resolved_sheet:
                     st.session_state["excel_sheet_name"] = resolved_sheet
             except Exception as exc:
                 st.error(f"文件结构预览失败：{exc}")
         file_probe_payload = st.session_state.get("file_probe_payload")
-        if isinstance(file_probe_payload, dict) and file_probe_payload.get("sheet_names"):
+        if isinstance(file_probe_payload, dict) and file_probe_payload.get(
+            "sheet_names"
+        ):
             sheet_options = list(file_probe_payload["sheet_names"])
             active_sheet = st.session_state.get("excel_sheet_name", sheet_options[0])
-            default_index = sheet_options.index(active_sheet) if active_sheet in sheet_options else 0
-            selected_sheet = st.selectbox("工作表候选", options=sheet_options, index=default_index, key="excel_sheet_picker")
+            default_index = (
+                sheet_options.index(active_sheet)
+                if active_sheet in sheet_options
+                else 0
+            )
+            selected_sheet = st.selectbox(
+                "工作表候选",
+                options=sheet_options,
+                index=default_index,
+                key="excel_sheet_picker",
+            )
             st.session_state["excel_sheet_name"] = selected_sheet
             excel_sheet_name = selected_sheet
     else:
@@ -1700,36 +2112,52 @@ summary_cols_2[2].metric(
 st.markdown("**回测前数据源摘要**")
 dataframe_stretch(pre_backtest_source_summary, hide_index=True)
 
-if str(timeframe) in {"30m", "15m", "5m"} and not normalize_stock_codes(stock_scope_text):
+if str(timeframe) in {"30m", "15m", "5m"} and not normalize_stock_codes(
+    stock_scope_text
+):
     st.warning("当前选择分钟级数据且未指定股票池，读取本地数据时 IO 开销可能较高。")
 
 sqlite_probe_payload = st.session_state.get("sqlite_probe_payload")
 file_probe_payload = st.session_state.get("file_probe_payload")
 if data_source_label == "SQLite 数据库" and isinstance(sqlite_probe_payload, dict):
-    section_header("SQLite 数据表探测", "展示候选表、字段识别结果和前 20 行预览，便于直接选表。")
+    section_header(
+        "SQLite 数据表探测", "展示候选表、字段识别结果和前 20 行预览，便于直接选表。"
+    )
     if not sqlite_probe_payload.get("overview_df", pd.DataFrame()).empty:
-        dataframe_stretch(sqlite_probe_payload["overview_df"], hide_index=True, height=240)
-    if sqlite_probe_payload.get("preview_df") is not None and not sqlite_probe_payload["preview_df"].empty:
+        dataframe_stretch(
+            sqlite_probe_payload["overview_df"], hide_index=True, height=240
+        )
+    if (
+        sqlite_probe_payload.get("preview_df") is not None
+        and not sqlite_probe_payload["preview_df"].empty
+    ):
         st.markdown("**前 20 行数据预览**")
-        dataframe_stretch(sqlite_probe_payload["preview_df"], hide_index=True, height=240)
+        dataframe_stretch(
+            sqlite_probe_payload["preview_df"], hide_index=True, height=240
+        )
 elif data_source_label == "Excel/CSV 文件" and isinstance(file_probe_payload, dict):
     section_header("文件结构预览", "展示文件结构、字段识别结果和前 20 行预览。")
     description = file_probe_payload.get("description", {})
     if description:
         description_df = pd.DataFrame(
-            [{
-                "文件名": description.get("file_name", ""),
-                "sheet": description.get("selected_sheet") or "-",
-                "列数": description.get("column_count", 0),
-                "列预览": description.get("columns_preview", ""),
-                "字段识别结果": description.get("detected_fields", ""),
-                "自动识别成功": "是" if description.get("auto_detected") else "否",
-            }]
+            [
+                {
+                    "文件名": description.get("file_name", ""),
+                    "sheet": description.get("selected_sheet") or "-",
+                    "列数": description.get("column_count", 0),
+                    "列预览": description.get("columns_preview", ""),
+                    "字段识别结果": description.get("detected_fields", ""),
+                    "自动识别成功": "是" if description.get("auto_detected") else "否",
+                }
+            ]
         )
         dataframe_stretch(description_df, hide_index=True)
         if not bool(description.get("auto_detected")):
             st.warning("文件字段未能自动识别，请检查表头或在下方填写字段映射。")
-    if file_probe_payload.get("preview_df") is not None and not file_probe_payload["preview_df"].empty:
+    if (
+        file_probe_payload.get("preview_df") is not None
+        and not file_probe_payload["preview_df"].empty
+    ):
         st.markdown("**前 20 行数据预览**")
         dataframe_stretch(file_probe_payload["preview_df"], hide_index=True, height=240)
 
@@ -2078,7 +2506,7 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
     with core_exit_col:
         st.markdown("**退出与风控**")
         st.caption(
-            "整笔退出保留在这里，ATR 跟踪与其他整笔退出并列；固定止盈放在次级入口。"
+            "整笔退出按时间、回撤、ATR、固定止盈分组展示，仅在启用时展开对应阈值。"
         )
         use_time_stop = st.checkbox("启用时间退出", value=True, key="use_time_stop")
         time_stop_cols = st.columns(2)
@@ -2096,7 +2524,8 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
         stop_loss_pct = exit_mode_cols[1].number_input(
             "全仓止损（%）", min_value=0.0, value=3.0, step=0.1
         )
-        drawdown_cols = st.columns(2)
+        st.markdown("**整笔止盈模块**")
+        drawdown_cols = st.columns([1.2, 1, 1])
         enable_profit_drawdown_exit = drawdown_cols[0].checkbox(
             "启用盈利回撤止盈（整笔）", value=False
         )
@@ -2107,12 +2536,22 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
             step=1.0,
             disabled=not enable_profit_drawdown_exit,
         )
+        min_profit_to_activate_profit_drawdown_pct = drawdown_cols[2].number_input(
+            "激活浮盈（%）",
+            min_value=0.0,
+            value=float(
+                factor_control_default("min_profit_to_activate_profit_drawdown_pct")
+            ),
+            step=0.1,
+            disabled=not enable_profit_drawdown_exit,
+            key="min_profit_to_activate_profit_drawdown_pct",
+        )
         ma_exit_cols = st.columns(2)
         enable_ma_exit = ma_exit_cols[0].checkbox("启用均线离场（整笔）", value=False)
         exit_ma_period = ma_exit_cols[1].number_input(
             "离场均线周期", min_value=1, value=10, step=1, disabled=not enable_ma_exit
         )
-        atr_exit_cols = st.columns(3)
+        atr_exit_cols = st.columns([1.1, 1, 1, 1])
         enable_atr_trailing_exit = atr_exit_cols[0].checkbox(
             "启用 ATR 跟踪止盈（整笔）", value=False
         )
@@ -2130,7 +2569,17 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
             step=0.1,
             disabled=not enable_atr_trailing_exit,
         )
-        take_profit_cols = st.columns(2)
+        min_profit_to_activate_atr_trailing_pct = atr_exit_cols[3].number_input(
+            "激活浮盈（%）",
+            min_value=0.0,
+            value=float(
+                factor_control_default("min_profit_to_activate_atr_trailing_pct")
+            ),
+            step=0.1,
+            disabled=not enable_atr_trailing_exit,
+            key="min_profit_to_activate_atr_trailing_pct",
+        )
+        take_profit_cols = st.columns([1.2, 1])
         enable_take_profit = take_profit_cols[0].checkbox(
             "启用固定止盈（次级）", value=True
         )
@@ -2384,7 +2833,9 @@ with st.expander("字段映射（可选）", expanded=False):
 if submitted:
     clear_result_state()
     source_type = SOURCE_LABEL_TO_TYPE[data_source_label]
-    uploaded_file_bytes, uploaded_file_name, normalized_input_file_path = _resolve_uploaded_file_inputs(uploaded_market_file, input_file_path)
+    uploaded_file_bytes, uploaded_file_name, normalized_input_file_path = (
+        _resolve_uploaded_file_inputs(uploaded_market_file, input_file_path)
+    )
 
     column_overrides = normalize_column_overrides(
         {
@@ -2459,11 +2910,17 @@ if submitted:
         enable_take_profit=bool(enable_take_profit),
         enable_profit_drawdown_exit=bool(enable_profit_drawdown_exit),
         profit_drawdown_pct=float(profit_drawdown_pct),
+        min_profit_to_activate_profit_drawdown_pct=float(
+            min_profit_to_activate_profit_drawdown_pct
+        ),
         enable_ma_exit=bool(enable_ma_exit),
         exit_ma_period=int(exit_ma_period),
         enable_atr_trailing_exit=bool(enable_atr_trailing_exit),
         atr_trailing_period=int(atr_trailing_period),
         atr_trailing_multiplier=float(atr_trailing_multiplier),
+        min_profit_to_activate_atr_trailing_pct=float(
+            min_profit_to_activate_atr_trailing_pct
+        ),
         ma_exit_batches=int(ma_exit_batches),
         partial_exit_enabled=bool(partial_exit_enabled),
         partial_exit_count=int(partial_exit_count),
@@ -2511,7 +2968,9 @@ if submitted:
                     end_date=params.end_date,
                     stock_codes=tuple(params.stock_codes),
                     table_name=params.table_name,
-                    column_override_items=tuple(sorted(params.column_overrides.items())),
+                    column_override_items=tuple(
+                        sorted(params.column_overrides.items())
+                    ),
                     lookback_days=params.required_lookback_days,
                     lookahead_days=params.required_lookahead_days,
                     db_path=params.db_path,
@@ -2541,10 +3000,19 @@ if submitted:
                 excel_bytes = export_to_excel_bytes(
                     detail_df, daily_df, equity_df, scan_df=scan_df
                 )
+                trade_behavior_df = build_trade_behavior_overview(detail_df)
+                drawdown_episodes_df, drawdown_contributors_df = (
+                    build_drawdown_diagnostics(equity_df, detail_df)
+                )
+                anomaly_queue_df = build_trade_anomaly_queue(detail_df, params)
             st.success("回测完成")
             st.session_state["detail_df"] = detail_df
             st.session_state["daily_df"] = daily_df
             st.session_state["equity_df"] = equity_df
+            st.session_state["trade_behavior_df"] = trade_behavior_df
+            st.session_state["drawdown_episodes_df"] = drawdown_episodes_df
+            st.session_state["drawdown_contributors_df"] = drawdown_contributors_df
+            st.session_state["anomaly_queue_df"] = anomaly_queue_df
             st.session_state["stats"] = stats
             st.session_state["scan_df"] = scan_df
             st.session_state["scan_metric"] = params.scan_config.metric
@@ -2562,6 +3030,12 @@ if submitted:
 detail_df = st.session_state.get("detail_df", pd.DataFrame())
 daily_df = st.session_state.get("daily_df", pd.DataFrame())
 equity_df = st.session_state.get("equity_df", pd.DataFrame())
+trade_behavior_df = st.session_state.get("trade_behavior_df", pd.DataFrame())
+drawdown_episodes_df = st.session_state.get("drawdown_episodes_df", pd.DataFrame())
+drawdown_contributors_df = st.session_state.get(
+    "drawdown_contributors_df", pd.DataFrame()
+)
+anomaly_queue_df = st.session_state.get("anomaly_queue_df", pd.DataFrame())
 stats = st.session_state.get("stats", {})
 scan_df = st.session_state.get("scan_df", pd.DataFrame())
 scan_metric = str(st.session_state.get("scan_metric", "total_return_pct"))
@@ -2603,6 +3077,40 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
                 column_config=build_summary_column_config(),
                 height=260,
             )
+        if isinstance(trade_behavior_df, pd.DataFrame) and not trade_behavior_df.empty:
+            st.markdown("**交易行为总览**")
+            behavior_metrics = trade_behavior_df.iloc[0]
+            behavior_cols = st.columns(6)
+            behavior_cols[0].metric(
+                "平均最大有利波动",
+                f"{float(behavior_metrics.get('avg_mfe_pct', 0.0)):.2f}%",
+            )
+            behavior_cols[1].metric(
+                "平均最大不利波动",
+                f"{float(behavior_metrics.get('avg_mae_pct', 0.0)):.2f}%",
+            )
+            behavior_cols[2].metric(
+                "平均利润回吐",
+                f"{float(behavior_metrics.get('avg_give_back_pct', 0.0)):.2f}%",
+            )
+            behavior_cols[3].metric(
+                "平均 MFE 兑现率",
+                f"{float(behavior_metrics.get('avg_mfe_capture_pct', 0.0)):.2f}%",
+            )
+            behavior_cols[4].metric(
+                "触发成交占比",
+                f"{float(behavior_metrics.get('trigger_fill_share_pct', 0.0)):.2f}%",
+            )
+            behavior_cols[5].metric(
+                "多批成交占比",
+                f"{float(behavior_metrics.get('multi_fill_trade_share_pct', 0.0)):.2f}%",
+            )
+            dataframe_stretch(
+                format_trade_behavior_for_display(trade_behavior_df),
+                hide_index=True,
+                column_config=build_trade_behavior_column_config(),
+                height=120,
+            )
         st.download_button(
             "导出 Excel",
             data=st.session_state["excel_bytes"],
@@ -2625,6 +3133,47 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
                 column_config=build_equity_column_config(),
                 height=260,
             )
+            if (
+                isinstance(drawdown_episodes_df, pd.DataFrame)
+                and not drawdown_episodes_df.empty
+            ):
+                st.markdown("**回撤诊断**")
+                dd_metric_cols = st.columns(4)
+                dd_metric_cols[0].metric("回撤段数", f"{len(drawdown_episodes_df)}")
+                dd_metric_cols[1].metric(
+                    "最深回撤",
+                    f"{float(drawdown_episodes_df['peak_to_trough_pct'].max()):.2f}%",
+                )
+                dd_metric_cols[2].metric(
+                    "最长水下周期",
+                    f"{int(drawdown_episodes_df['underwater_bars'].max())}",
+                )
+                dd_metric_cols[3].metric(
+                    "最大回撤主导原因",
+                    str(drawdown_episodes_df.iloc[0]["dominant_entry_reason"] or "-"),
+                )
+                dd_cols = st.columns(2)
+                with dd_cols[0]:
+                    dataframe_stretch(
+                        format_drawdown_episodes_for_display(drawdown_episodes_df),
+                        hide_index=True,
+                        column_config=build_drawdown_episode_column_config(),
+                        height=240,
+                    )
+                if (
+                    isinstance(drawdown_contributors_df, pd.DataFrame)
+                    and not drawdown_contributors_df.empty
+                ):
+                    with dd_cols[1]:
+                        st.caption("最大回撤段内的开仓原因贡献分布")
+                        dataframe_stretch(
+                            format_drawdown_contributors_for_display(
+                                drawdown_contributors_df
+                            ),
+                            hide_index=True,
+                            column_config=build_drawdown_contributor_column_config(),
+                            height=240,
+                        )
         else:
             st.info("暂无资金曲线数据")
 
@@ -2639,6 +3188,35 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
             detail_meta_cols[2].metric(
                 "净收益中位数", f"{float(stats.get('median_net_return_pct', 0.0)):.2f}%"
             )
+            if (
+                isinstance(anomaly_queue_df, pd.DataFrame)
+                and not anomaly_queue_df.empty
+            ):
+                st.markdown("**异常交易队列**")
+                anomaly_counts = anomaly_queue_df["anomaly_type"].value_counts()
+                anomaly_metric_cols = st.columns(4)
+                anomaly_metric_cols[0].metric("异常交易数", f"{len(anomaly_queue_df)}")
+                anomaly_metric_cols[1].metric(
+                    "固定止盈复审",
+                    f"{int(anomaly_counts.get('fixed_tp_review', 0) or 0)}",
+                )
+                anomaly_metric_cols[2].metric(
+                    "利润回撤复审",
+                    f"{int(anomaly_counts.get('profit_drawdown_review', 0) or 0)}",
+                )
+                anomaly_metric_cols[3].metric(
+                    "ATR 回撤复审",
+                    f"{int(anomaly_counts.get('atr_trailing_review', 0) or 0)}",
+                )
+                st.caption(
+                    "异常严重度按持有周期锚定：优先看日均最大浮盈/日均最大不利波动及是否越过对应激发阈值。"
+                )
+                dataframe_stretch(
+                    format_anomaly_queue_for_display(anomaly_queue_df),
+                    hide_index=True,
+                    column_config=build_anomaly_queue_column_config(),
+                    height=280,
+                )
             dataframe_stretch(
                 format_detail_for_display(detail_df),
                 hide_index=True,

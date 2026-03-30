@@ -164,3 +164,92 @@ def test_format_detail_for_display_keeps_intraday_time_text() -> None:
     record = app.format_detail_for_display(detail).to_dict("records")[0]
     assert record["信号日期"] == "2024-01-01 10:05"
     assert record["卖出日期"] == "2024-01-01 10:55"
+
+
+def test_review_display_formatters_compact_behavior_drawdown_and_anomaly_values() -> (
+    None
+):
+    app = _load_app_module()
+
+    behavior_df = pd.DataFrame(
+        {
+            "executed_trades": [12.0],
+            "win_rate_pct": [58.33],
+            "avg_net_return_pct": [1.25],
+            "median_net_return_pct": [0.8],
+            "avg_mfe_pct": [4.5],
+            "avg_mae_pct": [-2.1],
+            "avg_give_back_pct": [2.6],
+            "avg_mfe_capture_pct": [43.21],
+            "trigger_fill_share_pct": [25.0],
+            "multi_fill_trade_share_pct": [33.33],
+            "avg_profit_drawdown_ratio": [0.56],
+        }
+    )
+    episodes_df = pd.DataFrame(
+        {
+            "episode_no": [1.0],
+            "drawdown_start_date": ["2024-01-02"],
+            "trough_date": ["2024-01-05"],
+            "recovery_date": ["2024-01-10"],
+            "peak_to_trough_pct": [12.34],
+            "underwater_bars": [5.0],
+            "trade_count": [3.0],
+            "worst_trade_return_pct": [-6.2],
+            "dominant_entry_reason": ["trend_breakout.up"],
+            "recovered_flag": [True],
+        }
+    )
+    contributors_df = pd.DataFrame(
+        {
+            "entry_reason": ["trend_breakout.up"],
+            "trade_count": [3.0],
+            "avg_net_return_pct": [-2.1],
+            "total_net_return_pct": [-6.3],
+            "avg_mae_pct": [-4.0],
+            "avg_mfe_pct": [1.2],
+        }
+    )
+    anomaly_df = pd.DataFrame(
+        {
+            "anomaly_type": ["missed_fixed_tp"],
+            "severity_score": [8.2],
+            "trade_no": [7.0],
+            "date": ["2024-01-03 10:30:00"],
+            "stock_code": ["000001.SZ"],
+            "holding_days": [4.0],
+            "activation_threshold_pct": [5.0],
+            "threshold_excess_pct": [4.7],
+            "holding_anchor_mfe_pct": [2.43],
+            "holding_anchor_mae_pct": [0.3],
+            "give_back_pct": [8.2],
+            "net_return_pct": [1.5],
+            "entry_reason": ["trend_breakout.up"],
+            "exit_reason": ["profit_drawdown: 利润回撤触发"],
+            "anomaly_note": ["最大浮盈 9.70%，最终仅实现 1.50%"],
+        }
+    )
+
+    behavior_record = app.format_trade_behavior_for_display(behavior_df).to_dict(
+        "records"
+    )[0]
+    episode_record = app.format_drawdown_episodes_for_display(episodes_df).to_dict(
+        "records"
+    )[0]
+    contributor_record = app.format_drawdown_contributors_for_display(
+        contributors_df
+    ).to_dict("records")[0]
+    anomaly_record = app.format_anomaly_queue_for_display(anomaly_df).to_dict(
+        "records"
+    )[0]
+
+    assert behavior_record["交易笔数"] == "12"
+    assert behavior_record["平均利润回吐"] == "2.6%"
+    assert behavior_record["平均利润回撤比"] == "0.56"
+    assert episode_record["峰谷回撤"] == "12.34%"
+    assert episode_record["是否恢复"] == "是"
+    assert contributor_record["累计净收益率"] == "-6.3%"
+    assert anomaly_record["严重度"] == "8.2"
+    assert anomaly_record["激发阈值"] == "5%"
+    assert anomaly_record["日均最大浮盈"] == "2.43%"
+    assert anomaly_record["信号日期"] == "2024-01-03 10:30"
