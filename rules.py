@@ -219,7 +219,10 @@ def _build_eshb_setup_frame(
         base_start = anchor_idx + 1
         base_slice = stock_df.iloc[base_start:idx]
         base_bars = len(base_slice)
-        if base_bars < params.eshb_base_min_bars or base_bars > params.eshb_base_max_bars:
+        if (
+            base_bars < params.eshb_base_min_bars
+            or base_bars > params.eshb_base_max_bars
+        ):
             continue
 
         anchor_high = float(stock_df.iloc[anchor_idx]["high"])
@@ -253,7 +256,9 @@ def _build_eshb_setup_frame(
         if anchor_break_depth_pct > params.eshb_max_anchor_break_depth_pct:
             continue
 
-        prior_volume_window = stock_df.iloc[max(0, anchor_idx - params.eshb_open_window_bars) : anchor_idx]
+        prior_volume_window = stock_df.iloc[
+            max(0, anchor_idx - params.eshb_open_window_bars) : anchor_idx
+        ]
         baseline_volume = float(prior_volume_window["volume"].mean())
         anchor_volume = float(stock_df.iloc[anchor_idx]["volume"])
         open_volume_ratio = (
@@ -261,7 +266,10 @@ def _build_eshb_setup_frame(
             if baseline_volume > EPSILON and not pd.isna(anchor_volume)
             else math.nan
         )
-        if pd.isna(open_volume_ratio) or open_volume_ratio < params.eshb_min_open_volume_ratio:
+        if (
+            pd.isna(open_volume_ratio)
+            or open_volume_ratio < params.eshb_min_open_volume_ratio
+        ):
             continue
 
         setup_columns.loc[idx, "eshb_anchor_high"] = anchor_high
@@ -272,7 +280,9 @@ def _build_eshb_setup_frame(
         setup_columns.loc[idx, "eshb_surge_pct"] = surge_pct
         setup_columns.loc[idx, "eshb_open_volume_ratio"] = open_volume_ratio
         setup_columns.loc[idx, "eshb_anchor_break_count"] = int(anchor_break_count)
-        setup_columns.loc[idx, "eshb_anchor_break_depth_pct"] = float(anchor_break_depth_pct)
+        setup_columns.loc[idx, "eshb_anchor_break_depth_pct"] = float(
+            anchor_break_depth_pct
+        )
 
     return setup_columns
 
@@ -308,7 +318,13 @@ def _resolve_entry_execution(
         trigger_value = (
             math.nan if _is_missing_scalar(trigger_raw) else _float_scalar(trigger_raw)
         )
-        return _float_scalar(signal_row["open"]), trigger_value, "open", None, entry_factor
+        return (
+            _float_scalar(signal_row["open"]),
+            trigger_value,
+            "open",
+            None,
+            entry_factor,
+        )
     if entry_factor not in BREAKOUT_ENTRY_FACTORS:
         return _float_scalar(signal_row["open"]), math.nan, "open", None, entry_factor
 
@@ -962,7 +978,8 @@ def simulate_trade(
                     peak_total_profit_ratio, current_total_profit_ratio
                 )
                 if (
-                    peak_total_profit_ratio > EPSILON
+                    peak_total_profit_ratio
+                    >= params.min_profit_to_activate_profit_drawdown_ratio
                     and not pd.isna(profit_drawdown_ratio)
                     and profit_drawdown_ratio >= params.profit_drawdown_ratio
                 ):
@@ -1020,7 +1037,12 @@ def simulate_trade(
                     if direction == "short"
                     else day_low <= trailing_stop_price
                 )
-                if atr_hit and trailing_stop_price is not None:
+                if (
+                    atr_hit
+                    and trailing_stop_price is not None
+                    and peak_total_profit_ratio
+                    >= params.min_profit_to_activate_atr_trailing_ratio
+                ):
                     fills.append(
                         TradeFill(
                             _trade_timestamp_str(day_date, params),

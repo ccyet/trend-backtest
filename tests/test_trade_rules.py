@@ -567,6 +567,59 @@ def test_slippage_does_not_change_whole_position_drawdown_trigger_timing():
     )
 
 
+def test_whole_position_profit_drawdown_waits_for_activation_threshold() -> None:
+    df = make_stock_df(
+        [
+            (100, 101, 99, 100),
+            (100, 103, 99, 102),
+            (102, 102, 99, 100),
+        ]
+    )
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            enable_take_profit=False,
+            enable_profit_drawdown_exit=True,
+            profit_drawdown_pct=20.0,
+            min_profit_to_activate_profit_drawdown_pct=5.0,
+            stop_loss_pct=50.0,
+            time_stop_days=2,
+            time_stop_target_pct=-50.0,
+            time_exit_mode="force_close",
+        ),
+    )
+    trade = require_trade(trade, reason)
+    assert trade["fills"][-1]["exit_type"] == "force_close"
+
+
+def test_whole_position_atr_trailing_waits_for_activation_threshold() -> None:
+    df = make_stock_df(
+        [
+            (100, 101, 99, 100),
+            (100, 103, 99, 102),
+            (102, 102, 99, 100),
+        ]
+    )
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            enable_take_profit=False,
+            enable_atr_trailing_exit=True,
+            atr_trailing_period=1,
+            atr_trailing_multiplier=1.0,
+            min_profit_to_activate_atr_trailing_pct=5.0,
+            stop_loss_pct=50.0,
+            time_stop_days=2,
+            time_stop_target_pct=-50.0,
+            time_exit_mode="force_close",
+        ),
+    )
+    trade = require_trade(trade, reason)
+    assert trade["fills"][-1]["exit_type"] == "force_close"
+
+
 def test_partial_total_profit_drawdown_uses_locked_first_batch_profit():
     rules = (
         PartialExitRule(True, 50, "fixed_tp", 1, target_profit_pct=10.0),

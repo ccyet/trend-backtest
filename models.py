@@ -54,9 +54,11 @@ SCAN_FIELD_CASTERS: dict[str, type[int] | type[float]] = {
     "stop_loss_pct": float,
     "take_profit_pct": float,
     "profit_drawdown_pct": float,
+    "min_profit_to_activate_profit_drawdown_pct": float,
     "exit_ma_period": int,
     "buy_slippage_pct": float,
     "sell_slippage_pct": float,
+    "min_profit_to_activate_atr_trailing_pct": float,
     "partial_rule_1_target_profit_pct": float,
     "partial_rule_2_target_profit_pct": float,
     "partial_rule_3_target_profit_pct": float,
@@ -140,9 +142,11 @@ BASE_FACTOR_SCAN_FIELDS = frozenset(
         "stop_loss_pct",
         "take_profit_pct",
         "profit_drawdown_pct",
+        "min_profit_to_activate_profit_drawdown_pct",
         "exit_ma_period",
         "atr_trailing_period",
         "atr_trailing_multiplier",
+        "min_profit_to_activate_atr_trailing_pct",
         "buy_slippage_pct",
         "sell_slippage_pct",
     }
@@ -320,9 +324,11 @@ class AnalysisParams:
     vcb_breakout_lookback: int = 20
     buy_slippage_pct: float = 0.0
     sell_slippage_pct: float = 0.0
+    min_profit_to_activate_profit_drawdown_pct: float = 5.0
     enable_atr_trailing_exit: bool = False
     atr_trailing_period: int = 14
     atr_trailing_multiplier: float = 3.0
+    min_profit_to_activate_atr_trailing_pct: float = 5.0
     enable_atr_filter: bool = False
     atr_filter_period: int = 14
     min_atr_filter_pct: float = 0.0
@@ -365,6 +371,14 @@ class AnalysisParams:
     @property
     def profit_drawdown_ratio(self) -> float:
         return self.profit_drawdown_pct / 100.0
+
+    @property
+    def min_profit_to_activate_profit_drawdown_ratio(self) -> float:
+        return self.min_profit_to_activate_profit_drawdown_pct / 100.0
+
+    @property
+    def min_profit_to_activate_atr_trailing_ratio(self) -> float:
+        return self.min_profit_to_activate_atr_trailing_pct / 100.0
 
     @property
     def buy_cost_ratio(self) -> float:
@@ -618,11 +632,15 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.entry_factor == "early_surge_high_base":
         if params.timeframe != "30m":
-            errors.append("early_surge_high_base 仅支持 timeframe=30m（30m 形态 + 5m 执行）。")
+            errors.append(
+                "early_surge_high_base 仅支持 timeframe=30m（30m 形态 + 5m 执行）。"
+            )
         if params.data_source_type != "local_parquet":
             errors.append("early_surge_high_base 仅支持 local_parquet 数据源。")
         if params.gap_direction != "up":
-            errors.append("early_surge_high_base 当前仅支持向上方向（gap_direction=up）。")
+            errors.append(
+                "early_surge_high_base 当前仅支持向上方向（gap_direction=up）。"
+            )
 
     if params.stop_loss_pct < 0:
         errors.append("止损比例不能为负数。")
@@ -635,6 +653,9 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.enable_profit_drawdown_exit and params.profit_drawdown_pct > 100:
         warnings.append("盈利回撤比例大于 100%，通常会导致很难触发，请确认设置。")
+
+    if params.min_profit_to_activate_profit_drawdown_pct < 0:
+        errors.append("盈利回撤止盈激活浮盈不能为负数。")
 
     if params.enable_ma_exit and params.exit_ma_period < 1:
         errors.append("止盈参考均线周期必须大于等于 1。")
@@ -695,7 +716,9 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
                 if rule.atr_period is None:
                     errors.append(f"第 {index} 批 atr_trailing 必须填写 ATR 周期。")
                 elif rule.atr_period < 1:
-                    errors.append(f"第 {index} 批 atr_trailing ATR 周期必须大于等于 1。")
+                    errors.append(
+                        f"第 {index} 批 atr_trailing ATR 周期必须大于等于 1。"
+                    )
 
                 if rule.atr_multiplier is None:
                     errors.append(f"第 {index} 批 atr_trailing 必须填写 ATR 倍数。")
@@ -719,6 +742,9 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.enable_atr_trailing_exit and params.atr_trailing_multiplier <= 0:
         errors.append("ATR 跟踪倍数必须大于 0。")
+
+    if params.min_profit_to_activate_atr_trailing_pct < 0:
+        errors.append("ATR 跟踪止盈激活浮盈不能为负数。")
 
     if params.enable_atr_filter and params.atr_filter_period < 1:
         errors.append("ATR 过滤周期必须大于等于 1。")
