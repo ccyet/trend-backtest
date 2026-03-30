@@ -3,12 +3,12 @@ from __future__ import annotations
 from collections import Counter
 from itertools import product
 import json
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import pandas as pd
 
 from data_loader import load_local_parquet_data
-from models import AnalysisParams, apply_scan_overrides
+from models import AnalysisParams, PartialExitRule, apply_scan_overrides
 from rules import ESHB_ENTRY_FACTOR, apply_gap_filters, simulate_trade
 
 
@@ -86,6 +86,60 @@ SCAN_RESULT_COLUMNS = [
     "trade_return_volatility_pct",
 ]
 
+TRADE_BEHAVIOR_COLUMNS = [
+    "executed_trades",
+    "win_rate_pct",
+    "avg_net_return_pct",
+    "median_net_return_pct",
+    "avg_mfe_pct",
+    "avg_mae_pct",
+    "avg_give_back_pct",
+    "avg_mfe_capture_pct",
+    "trigger_fill_share_pct",
+    "multi_fill_trade_share_pct",
+    "avg_profit_drawdown_ratio",
+]
+
+DD_EPISODE_COLUMNS = [
+    "episode_no",
+    "drawdown_start_date",
+    "trough_date",
+    "recovery_date",
+    "peak_to_trough_pct",
+    "underwater_bars",
+    "trade_count",
+    "worst_trade_return_pct",
+    "dominant_entry_reason",
+    "recovered_flag",
+]
+
+DD_CONTRIBUTOR_COLUMNS = [
+    "entry_reason",
+    "trade_count",
+    "avg_net_return_pct",
+    "total_net_return_pct",
+    "avg_mae_pct",
+    "avg_mfe_pct",
+]
+
+ANOMALY_QUEUE_COLUMNS = [
+    "anomaly_type",
+    "severity_score",
+    "trade_no",
+    "date",
+    "stock_code",
+    "holding_days",
+    "activation_threshold_pct",
+    "threshold_excess_pct",
+    "holding_anchor_mfe_pct",
+    "holding_anchor_mae_pct",
+    "give_back_pct",
+    "net_return_pct",
+    "entry_reason",
+    "exit_reason",
+    "anomaly_note",
+]
+
 
 def _empty_scan_stats() -> dict[str, int]:
     return {
@@ -110,6 +164,7 @@ def _empty_strategy_stats() -> dict[str, float]:
         "total_return_pct": 0.0,
         "max_drawdown_pct": 0.0,
         "avg_holding_days": 0.0,
+        "median_net_return_pct": 0.0,
         "avg_mfe_pct": 0.0,
         "avg_mae_pct": 0.0,
         "profit_risk_ratio": 0.0,
@@ -129,7 +184,9 @@ def _signal_window(params: AnalysisParams) -> tuple[pd.Timestamp, pd.Timestamp]:
     return start_ts, intraday_end
 
 
-def _prepare_execution_frame(stock_df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
+def _prepare_execution_frame(
+    stock_df: pd.DataFrame, params: AnalysisParams
+) -> pd.DataFrame:
     execution_df = stock_df.sort_values("date").reset_index(drop=True).copy()
     execution_df["prev_close"] = execution_df["close"].shift(1)
     execution_df["prev_high"] = execution_df["high"].shift(1)
@@ -182,7 +239,9 @@ def scan_trade_candidates(
             timeframe="5m",
         )
         for stock_code, stock_df in execution_data.groupby("stock_code", sort=True):
-            execution_by_code[str(stock_code)] = _prepare_execution_frame(stock_df, params)
+            execution_by_code[str(stock_code)] = _prepare_execution_frame(
+                stock_df, params
+            )
 
     for _, stock_df in all_data.groupby("stock_code", sort=True):
         enriched = apply_gap_filters(stock_df, params)
@@ -203,7 +262,9 @@ def scan_trade_candidates(
                 trigger_price = float(setup_row["entry_trigger_price"])
                 setup_time = pd.Timestamp(setup_row["date"])
                 candidate_exec = execution_df.loc[execution_df["date"] > setup_time]
-                trigger_hits = candidate_exec.loc[candidate_exec["high"] >= trigger_price]
+                trigger_hits = candidate_exec.loc[
+                    candidate_exec["high"] >= trigger_price
+                ]
                 if trigger_hits.empty:
                     trade = None
                     skip_reason = "entry_not_filled"
@@ -221,8 +282,12 @@ def scan_trade_candidates(
                             trade = None
                             skip_reason = "insufficient_future"
                         else:
-                            execution_df.loc[entry_idx, "entry_factor"] = ESHB_ENTRY_FACTOR
-                            execution_df.loc[entry_idx, "entry_trigger_price"] = trigger_price
+                            execution_df.loc[entry_idx, "entry_factor"] = (
+                                ESHB_ENTRY_FACTOR
+                            )
+                            execution_df.loc[entry_idx, "entry_trigger_price"] = (
+                                trigger_price
+                            )
                             execution_df.loc[
                                 entry_idx, "eshb_breakout_volume_ratio"
                             ] = breakout_volume_ratio
@@ -327,6 +392,7 @@ def build_strategy_trades(
     stats["final_net_value"] = float(strategy_df["nav_after_trade"].iloc[-1])
     stats["total_return_pct"] = (stats["final_net_value"] - 1.0) * 100.0
     stats["avg_holding_days"] = float(strategy_df["holding_days"].mean())
+    stats["median_net_return_pct"] = float(strategy_df["net_return_pct"].median())
     stats["avg_mfe_pct"] = float(strategy_df["mfe_pct"].mean())
     stats["avg_mae_pct"] = float(strategy_df["mae_pct"].mean())
     if stats["avg_mae_pct"] == 0:
@@ -436,9 +502,7 @@ def build_equity_curve(
             stock_code = str(active_trade["stock_code"])
             buy_price = float(active_trade["buy_price"])
             nav_before_trade = float(active_trade["nav_before_trade"])
-            sell_date = cast(
-                pd.Timestamp, pd.Timestamp(active_trade["sell_date"])
-            )
+            sell_date = cast(pd.Timestamp, pd.Timestamp(active_trade["sell_date"]))
             sell_date = sell_date.normalize() if is_daily else sell_date
 
             day_close = close_lookup.get((stock_code, current_date), active_last_close)
@@ -448,9 +512,7 @@ def build_equity_curve(
             # 按 fill 顺序处理当日成交
             while trade_state["fill_idx"] < len(trade_state["fills"]):
                 fill = trade_state["fills"][trade_state["fill_idx"]]
-                fill_date = cast(
-                    pd.Timestamp, pd.Timestamp(fill["sell_date"])
-                )
+                fill_date = cast(pd.Timestamp, pd.Timestamp(fill["sell_date"]))
                 fill_date = fill_date.normalize() if is_daily else fill_date
                 if fill_date != current_date:
                     break
@@ -639,3 +701,386 @@ def build_daily_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
     ordered["win_count"] = ordered["win_count"].astype(int)
     ordered["lose_count"] = ordered["lose_count"].astype(int)
     return ordered
+
+
+def build_trade_behavior_overview(detail_df: pd.DataFrame) -> pd.DataFrame:
+    if detail_df.empty:
+        return pd.DataFrame(columns=pd.Index(TRADE_BEHAVIOR_COLUMNS))
+
+    trade_count = len(detail_df)
+    give_back_series = (
+        detail_df["mfe_pct"].fillna(0.0) - detail_df["net_return_pct"].fillna(0.0)
+    ).clip(lower=0.0)
+    positive_mfe = detail_df["mfe_pct"].fillna(0.0) > 0
+    capture_series = pd.Series(0.0, index=detail_df.index, dtype=float)
+    capture_series.loc[positive_mfe] = (
+        detail_df.loc[positive_mfe, "net_return_pct"].fillna(0.0)
+        / detail_df.loc[positive_mfe, "mfe_pct"].replace(0.0, pd.NA)
+        * 100.0
+    ).fillna(0.0)
+
+    overview = pd.DataFrame(
+        [
+            {
+                "executed_trades": trade_count,
+                "win_rate_pct": float(detail_df["win_flag"].fillna(0).mean() * 100.0),
+                "avg_net_return_pct": float(detail_df["net_return_pct"].mean()),
+                "median_net_return_pct": float(detail_df["net_return_pct"].median()),
+                "avg_mfe_pct": float(detail_df["mfe_pct"].mean()),
+                "avg_mae_pct": float(detail_df["mae_pct"].mean()),
+                "avg_give_back_pct": float(give_back_series.mean()),
+                "avg_mfe_capture_pct": float(capture_series.mean()),
+                "trigger_fill_share_pct": float(
+                    (detail_df["entry_fill_type"].fillna("") == "trigger").mean()
+                    * 100.0
+                ),
+                "multi_fill_trade_share_pct": float(
+                    (detail_df["fill_count"].fillna(0) > 1).mean() * 100.0
+                ),
+                "avg_profit_drawdown_ratio": float(
+                    detail_df["profit_drawdown_ratio"].dropna().mean()
+                )
+                if bool(detail_df["profit_drawdown_ratio"].notna().any())
+                else 0.0,
+            }
+        ],
+        columns=pd.Index(TRADE_BEHAVIOR_COLUMNS),
+    )
+    return overview
+
+
+def _episode_trade_mask(
+    strategy_df: pd.DataFrame, start_date: pd.Timestamp, end_date: pd.Timestamp
+) -> pd.Series:
+    buy_dates = pd.to_datetime(strategy_df["date"])
+    sell_dates = pd.to_datetime(strategy_df["sell_date"])
+    return (buy_dates <= end_date) & (sell_dates >= start_date)
+
+
+def build_drawdown_diagnostics(
+    equity_df: pd.DataFrame, strategy_df: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    empty_episodes = pd.DataFrame(columns=pd.Index(DD_EPISODE_COLUMNS))
+    empty_contributors = pd.DataFrame(columns=pd.Index(DD_CONTRIBUTOR_COLUMNS))
+    if equity_df.empty:
+        return empty_episodes, empty_contributors
+
+    drawdown_df = equity_df[["date", "drawdown_pct"]].copy()
+    drawdown_df["date"] = pd.to_datetime(drawdown_df["date"])
+    drawdown_df = (
+        pd.DataFrame(drawdown_df).sort_values(by="date").reset_index(drop=True)
+    )
+
+    episodes: list[dict[str, Any]] = []
+    in_episode = False
+    start_idx = 0
+
+    for idx, drawdown in enumerate(drawdown_df["drawdown_pct"].fillna(0.0)):
+        if not in_episode and drawdown < 0:
+            in_episode = True
+            start_idx = idx
+        is_recovered = in_episode and drawdown >= 0
+        is_last = idx == len(drawdown_df) - 1
+        if not in_episode:
+            continue
+        if not is_recovered and not is_last:
+            continue
+
+        end_idx = idx if is_recovered else idx
+        episode_slice = drawdown_df.iloc[start_idx : end_idx + 1].copy()
+        trough_local_idx = int(episode_slice["drawdown_pct"].idxmin())
+        trough_row = drawdown_df.loc[trough_local_idx]
+        start_date = cast(
+            pd.Timestamp, pd.to_datetime(drawdown_df.loc[start_idx, "date"])
+        )
+        end_date = cast(pd.Timestamp, pd.to_datetime(drawdown_df.loc[end_idx, "date"]))
+        trade_count = 0
+        worst_trade_return_pct = 0.0
+        dominant_entry_reason = ""
+
+        if not strategy_df.empty:
+            trade_mask = _episode_trade_mask(strategy_df, start_date, end_date)
+            episode_trades = strategy_df.loc[trade_mask].copy()
+            trade_count = int(len(episode_trades))
+            if not episode_trades.empty:
+                worst_trade_return_pct = float(episode_trades["net_return_pct"].min())
+                dominant = (
+                    episode_trades.groupby("entry_reason", dropna=False)[
+                        "net_return_pct"
+                    ]
+                    .sum()
+                    .sort_values()
+                )
+                dominant_entry_reason = (
+                    str(dominant.index[0]) if not dominant.empty else ""
+                )
+
+        episodes.append(
+            {
+                "episode_no": len(episodes) + 1,
+                "drawdown_start_date": start_date,
+                "trough_date": cast(pd.Timestamp, pd.to_datetime(trough_row["date"])),
+                "recovery_date": end_date if is_recovered else pd.NaT,
+                "peak_to_trough_pct": abs(float(episode_slice["drawdown_pct"].min())),
+                "underwater_bars": len(episode_slice),
+                "trade_count": trade_count,
+                "worst_trade_return_pct": worst_trade_return_pct,
+                "dominant_entry_reason": dominant_entry_reason,
+                "recovered_flag": bool(is_recovered),
+            }
+        )
+        in_episode = False
+
+    episodes_df = pd.DataFrame(episodes, columns=pd.Index(DD_EPISODE_COLUMNS))
+    if episodes_df.empty or strategy_df.empty:
+        return episodes_df, empty_contributors
+
+    focus_episode = episodes_df.sort_values(
+        ["peak_to_trough_pct", "episode_no"], ascending=[False, True]
+    ).iloc[0]
+    focus_start = cast(
+        pd.Timestamp, pd.to_datetime(focus_episode["drawdown_start_date"])
+    )
+    focus_end_raw = focus_episode["recovery_date"]
+    latest_trough = cast(pd.Timestamp, pd.to_datetime(episodes_df["trough_date"]).max())
+    focus_end = (
+        cast(pd.Timestamp, pd.to_datetime(focus_end_raw))
+        if pd.notna(focus_end_raw)
+        else latest_trough
+    )
+    contributor_mask = _episode_trade_mask(strategy_df, focus_start, focus_end)
+    focus_trades = strategy_df.loc[contributor_mask].copy()
+    if focus_trades.empty:
+        return episodes_df, empty_contributors
+
+    contributors_df = (
+        focus_trades.groupby("entry_reason", dropna=False)
+        .agg(
+            trade_count=("stock_code", "size"),
+            avg_net_return_pct=("net_return_pct", "mean"),
+            total_net_return_pct=("net_return_pct", "sum"),
+            avg_mae_pct=("mae_pct", "mean"),
+            avg_mfe_pct=("mfe_pct", "mean"),
+        )
+        .reset_index()
+        .sort_values(["total_net_return_pct", "trade_count"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+    return episodes_df, contributors_df.loc[:, DD_CONTRIBUTOR_COLUMNS]
+
+
+def _partial_exit_rules(params: AnalysisParams, mode: str) -> list[PartialExitRule]:
+    return [
+        rule
+        for rule in params.partial_exit_rules
+        if rule.enabled and str(rule.mode) == mode
+    ]
+
+
+def _review_activation_thresholds(params: AnalysisParams) -> dict[str, float | None]:
+    fixed_tp_threshold = (
+        float(params.take_profit_pct) if params.enable_take_profit else None
+    )
+
+    profit_drawdown_rules = _partial_exit_rules(params, "profit_drawdown")
+    if profit_drawdown_rules:
+        profit_drawdown_threshold = min(
+            float(rule.min_profit_to_activate_drawdown or 5.0)
+            for rule in profit_drawdown_rules
+        )
+    elif params.enable_profit_drawdown_exit:
+        profit_drawdown_threshold = float(
+            params.min_profit_to_activate_profit_drawdown_pct
+        )
+    else:
+        profit_drawdown_threshold = None
+
+    atr_rules = _partial_exit_rules(params, "atr_trailing")
+    if atr_rules or params.enable_atr_trailing_exit:
+        atr_threshold = float(params.min_profit_to_activate_atr_trailing_pct)
+    else:
+        atr_threshold = None
+
+    return {
+        "fixed_tp": fixed_tp_threshold,
+        "profit_drawdown": profit_drawdown_threshold,
+        "atr_trailing": atr_threshold,
+    }
+
+
+def build_trade_anomaly_queue(
+    detail_df: pd.DataFrame, params: AnalysisParams, limit: int = 15
+) -> pd.DataFrame:
+    if detail_df.empty:
+        return pd.DataFrame(columns=pd.Index(ANOMALY_QUEUE_COLUMNS))
+
+    working = detail_df.copy()
+    holding_days = working["holding_days"].fillna(0.0).clip(lower=1.0)
+    working["give_back_pct"] = (
+        working["mfe_pct"].fillna(0.0) - working["net_return_pct"].fillna(0.0)
+    ).clip(lower=0.0)
+    working["abs_mae_pct"] = working["mae_pct"].fillna(0.0).abs()
+    working["holding_anchor_mfe_pct"] = working["mfe_pct"].fillna(0.0) / holding_days
+    working["holding_anchor_mae_pct"] = working["abs_mae_pct"] / holding_days
+    working["holding_anchor_give_back_pct"] = working["give_back_pct"] / holding_days
+
+    thresholds = _review_activation_thresholds(params)
+
+    anomaly_frames: list[pd.DataFrame] = []
+
+    def _append_anomalies(
+        source_df: pd.DataFrame,
+        anomaly_type: str,
+        severity_col: str,
+        note_builder: Callable[[pd.Series], str],
+        top_n: int = 5,
+    ) -> None:
+        if source_df.empty:
+            return
+        subset = source_df.nlargest(top_n, severity_col).copy()
+        subset["anomaly_type"] = anomaly_type
+        subset["severity_score"] = subset[severity_col].fillna(0.0)
+        subset["anomaly_note"] = subset.apply(note_builder, axis=1)
+        anomaly_frames.append(subset.loc[:, ANOMALY_QUEUE_COLUMNS])
+
+    fixed_tp_threshold = thresholds["fixed_tp"]
+    if fixed_tp_threshold is not None:
+        fixed_tp_candidates = working.loc[
+            (working["mfe_pct"].fillna(0.0) >= fixed_tp_threshold)
+            & (~working["exit_reason"].fillna("").str.contains("take_profit"))
+        ].copy()
+        if not fixed_tp_candidates.empty:
+            fixed_tp_candidates["activation_threshold_pct"] = fixed_tp_threshold
+            fixed_tp_candidates["threshold_excess_pct"] = (
+                fixed_tp_candidates["mfe_pct"].fillna(0.0) - fixed_tp_threshold
+            ).clip(lower=0.0)
+            fixed_tp_candidates = fixed_tp_candidates.loc[
+                fixed_tp_candidates["threshold_excess_pct"]
+                >= max(0.5, fixed_tp_threshold * 0.1)
+            ].copy()
+            fixed_tp_candidates["fixed_tp_severity"] = (
+                fixed_tp_candidates["threshold_excess_pct"]
+                + fixed_tp_candidates["holding_anchor_give_back_pct"]
+            )
+            _append_anomalies(
+                fixed_tp_candidates,
+                "fixed_tp_review",
+                "fixed_tp_severity",
+                lambda row: (
+                    f"持有 {int(row['holding_days'])} 天内最大浮盈 {float(row['mfe_pct']):.2f}% ，已超过固定止盈激发阈值 "
+                    f"{float(row['activation_threshold_pct']):.2f}% ，但最终由 {row['exit_reason']} 离场，仅实现 {float(row['net_return_pct']):.2f}%"
+                ),
+            )
+
+    profit_drawdown_threshold = thresholds["profit_drawdown"]
+    if profit_drawdown_threshold is not None:
+        profit_drawdown_candidates = working.loc[
+            (working["mfe_pct"].fillna(0.0) >= profit_drawdown_threshold)
+            & (working["give_back_pct"] >= max(1.0, profit_drawdown_threshold * 0.5))
+        ].copy()
+        if not profit_drawdown_candidates.empty:
+            profit_drawdown_candidates["activation_threshold_pct"] = (
+                profit_drawdown_threshold
+            )
+            profit_drawdown_candidates["threshold_excess_pct"] = (
+                profit_drawdown_candidates["mfe_pct"].fillna(0.0)
+                - profit_drawdown_threshold
+            ).clip(lower=0.0)
+            profit_drawdown_candidates["profit_drawdown_severity"] = (
+                profit_drawdown_candidates["holding_anchor_give_back_pct"]
+            )
+            _append_anomalies(
+                profit_drawdown_candidates,
+                "profit_drawdown_review",
+                "profit_drawdown_severity",
+                lambda row: (
+                    f"持有 {int(row['holding_days'])} 天内最大浮盈 {float(row['mfe_pct']):.2f}% ，达到利润回撤激发阈值 "
+                    f"{float(row['activation_threshold_pct']):.2f}% 后仍回吐 {float(row['give_back_pct']):.2f}% ，当前离场为 {row['exit_reason']}"
+                ),
+            )
+
+    atr_threshold = thresholds["atr_trailing"]
+    if atr_threshold is not None:
+        atr_candidates = working.loc[
+            (working["mfe_pct"].fillna(0.0) >= atr_threshold)
+            & (working["give_back_pct"] >= max(1.0, atr_threshold * 0.5))
+            & (~working["exit_reason"].fillna("").str.contains("atr_trailing"))
+        ].copy()
+        if not atr_candidates.empty:
+            atr_candidates["activation_threshold_pct"] = atr_threshold
+            atr_candidates["threshold_excess_pct"] = (
+                atr_candidates["mfe_pct"].fillna(0.0) - atr_threshold
+            ).clip(lower=0.0)
+            atr_candidates["atr_trailing_severity"] = atr_candidates[
+                "holding_anchor_give_back_pct"
+            ]
+            _append_anomalies(
+                atr_candidates,
+                "atr_trailing_review",
+                "atr_trailing_severity",
+                lambda row: (
+                    f"持有 {int(row['holding_days'])} 天内最大浮盈 {float(row['mfe_pct']):.2f}% ，已超过 ATR 回撤诊断激发阈值 "
+                    f"{float(row['activation_threshold_pct']):.2f}% ，但最终未以 ATR 跟踪止盈离场"
+                ),
+            )
+
+    adverse_candidates = working.loc[
+        working["holding_anchor_mae_pct"]
+        >= max(
+            0.8, float(params.stop_loss_pct) / max(float(params.time_stop_days), 1.0)
+        )
+    ].copy()
+    if not adverse_candidates.empty:
+        adverse_candidates["activation_threshold_pct"] = max(
+            0.8, float(params.stop_loss_pct) / max(float(params.time_stop_days), 1.0)
+        )
+        adverse_candidates["threshold_excess_pct"] = (
+            adverse_candidates["holding_anchor_mae_pct"]
+            - adverse_candidates["activation_threshold_pct"]
+        ).clip(lower=0.0)
+        adverse_candidates["adverse_severity"] = adverse_candidates[
+            "holding_anchor_mae_pct"
+        ]
+        _append_anomalies(
+            adverse_candidates,
+            "holding_period_adverse",
+            "adverse_severity",
+            lambda row: (
+                f"持有 {int(row['holding_days'])} 天内最大不利波动 {float(row['mae_pct']):.2f}% ，折算日均不利波动 "
+                f"{float(row['holding_anchor_mae_pct']):.2f}%"
+            ),
+        )
+
+    stall_candidates = working.loc[
+        (
+            working["holding_days"].fillna(0.0)
+            > working["holding_days"].fillna(0.0).median()
+        )
+        & (working["net_return_pct"].fillna(0.0).abs() <= 1.0)
+    ].copy()
+    if not stall_candidates.empty:
+        stall_candidates["activation_threshold_pct"] = 1.0
+        stall_candidates["threshold_excess_pct"] = 0.0
+        stall_candidates["stall_severity"] = stall_candidates["holding_days"].fillna(
+            0.0
+        )
+        _append_anomalies(
+            stall_candidates,
+            "long_hold_stall",
+            "stall_severity",
+            lambda row: (
+                f"持有 {int(row['holding_days'])} 天但净收益仅 {float(row['net_return_pct']):.2f}% ，日均最大浮盈/不利波动分别为 "
+                f"{float(row['holding_anchor_mfe_pct']):.2f}% / {float(row['holding_anchor_mae_pct']):.2f}%"
+            ),
+        )
+
+    if not anomaly_frames:
+        return pd.DataFrame(columns=pd.Index(ANOMALY_QUEUE_COLUMNS))
+
+    anomaly_df = (
+        pd.concat(anomaly_frames, ignore_index=True)
+        .sort_values(["severity_score", "date"], ascending=[False, False])
+        .head(limit)
+        .reset_index(drop=True)
+    )
+    return anomaly_df.loc[:, ANOMALY_QUEUE_COLUMNS]

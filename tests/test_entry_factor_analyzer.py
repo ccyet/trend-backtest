@@ -327,7 +327,9 @@ def test_analyze_all_stocks_supports_short_candle_run_strategy_level_stats() -> 
     assert float(stats["total_return_pct"]) > 0.0
 
 
-def test_analyze_all_stocks_supports_candle_run_acceleration_strategy_level_stats() -> None:
+def test_analyze_all_stocks_supports_candle_run_acceleration_strategy_level_stats() -> (
+    None
+):
     market_data = pd.DataFrame(
         {
             "date": pd.to_datetime(
@@ -360,7 +362,9 @@ def test_analyze_all_stocks_supports_candle_run_acceleration_strategy_level_stat
     assert float(stats["total_return_pct"]) > 0.0
 
 
-def test_analyze_all_stocks_supports_short_candle_run_acceleration_strategy_level_stats() -> None:
+def test_analyze_all_stocks_supports_short_candle_run_acceleration_strategy_level_stats() -> (
+    None
+):
     market_data = pd.DataFrame(
         {
             "date": pd.to_datetime(
@@ -464,3 +468,120 @@ def test_scan_trade_candidates_supports_eshb_30m_setup_and_5m_execution(
     assert int(stats["closed_trade_candidates"]) == 1
     assert detail_df.iloc[0]["entry_factor"] == "early_surge_high_base"
     assert detail_df.iloc[0]["entry_fill_type"] == "open"
+
+
+def test_build_trade_behavior_overview_summarizes_behavior_metrics() -> None:
+    detail_df = pd.DataFrame(
+        {
+            "trade_no": [1, 2],
+            "entry_fill_type": ["trigger", "open"],
+            "fill_count": [2, 1],
+            "win_flag": [1, 0],
+            "net_return_pct": [5.0, -2.0],
+            "mfe_pct": [8.0, 1.0],
+            "mae_pct": [-1.5, -4.0],
+            "profit_drawdown_ratio": [0.4, 0.0],
+        }
+    )
+
+    overview = analyzer.build_trade_behavior_overview(detail_df)
+
+    assert len(overview) == 1
+    row = overview.iloc[0]
+    assert int(row["executed_trades"]) == 2
+    assert abs(float(row["win_rate_pct"]) - 50.0) < 1e-12
+    assert abs(float(row["avg_give_back_pct"]) - 3.0) < 1e-12
+    assert abs(float(row["trigger_fill_share_pct"]) - 50.0) < 1e-12
+    assert abs(float(row["multi_fill_trade_share_pct"]) - 50.0) < 1e-12
+
+
+def test_build_drawdown_diagnostics_returns_episodes_and_reason_contributors() -> None:
+    equity_df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [
+                    "2024-01-01",
+                    "2024-01-02",
+                    "2024-01-03",
+                    "2024-01-04",
+                    "2024-01-05",
+                ]
+            ),
+            "net_value": [1.0, 1.05, 1.0, 0.95, 1.05],
+            "drawdown_pct": [0.0, 0.0, -4.7619, -9.5238, 0.0],
+        }
+    )
+    strategy_df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "sell_date": pd.to_datetime(["2024-01-03", "2024-01-05"]),
+            "stock_code": ["000001.SZ", "000002.SZ"],
+            "entry_reason": ["trend_breakout.up", "candle_run.up"],
+            "net_return_pct": [-4.0, -6.0],
+            "mfe_pct": [1.0, 0.5],
+            "mae_pct": [-5.0, -7.0],
+        }
+    )
+
+    episodes_df, contributors_df = analyzer.build_drawdown_diagnostics(
+        equity_df, strategy_df
+    )
+
+    assert len(episodes_df) == 1
+    assert float(episodes_df.iloc[0]["peak_to_trough_pct"]) > 9.0
+    assert int(episodes_df.iloc[0]["trade_count"]) == 2
+    assert episodes_df.iloc[0]["dominant_entry_reason"] == "candle_run.up"
+    assert not contributors_df.empty
+    assert contributors_df.iloc[0]["entry_reason"] == "candle_run.up"
+
+
+def test_build_trade_anomaly_queue_flags_giveback_loss_and_stall_patterns() -> None:
+    detail_df = pd.DataFrame(
+        {
+            "trade_no": [1, 2, 3],
+            "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"]),
+            "stock_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "entry_reason": [
+                "trend_breakout.up",
+                "candle_run.up",
+                "trend_breakout.up",
+            ],
+            "exit_reason": [
+                "profit_drawdown: 利润回撤触发",
+                "stop_loss: 全仓止损触发",
+                "time_exit: 时间退出触发",
+            ],
+            "holding_days": [2, 1, 10],
+            "net_return_pct": [1.0, -8.0, 0.2],
+            "mfe_pct": [9.0, 0.5, 0.8],
+            "mae_pct": [-1.0, -9.5, -0.5],
+        }
+    )
+
+    params = make_params(
+        enable_take_profit=True,
+        take_profit_pct=5.0,
+        enable_profit_drawdown_exit=True,
+        enable_atr_trailing_exit=True,
+        atr_trailing_period=14,
+        atr_trailing_multiplier=3.0,
+        time_stop_days=5,
+        stop_loss_pct=5.0,
+    )
+
+    anomaly_df = analyzer.build_trade_anomaly_queue(detail_df, params, limit=10)
+
+    assert not anomaly_df.empty
+    assert set(anomaly_df["anomaly_type"]).issuperset(
+        {
+            "fixed_tp_review",
+            "profit_drawdown_review",
+            "atr_trailing_review",
+            "long_hold_stall",
+        }
+    )
+    fixed_tp_row = anomaly_df.loc[anomaly_df["anomaly_type"] == "fixed_tp_review"].iloc[
+        0
+    ]
+    assert abs(float(fixed_tp_row["activation_threshold_pct"]) - 5.0) < 1e-12
+    assert float(fixed_tp_row["holding_anchor_mfe_pct"]) > 4.0
