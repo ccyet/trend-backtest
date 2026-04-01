@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -63,6 +64,8 @@ RESULT_STATE_KEYS = [
     "best_scan_overrides",
     "excel_bytes",
     "download_name",
+    "per_stock_stats_df",
+    "batch_backtest_mode",
 ]
 
 DETAIL_PRICE_COLUMNS = [
@@ -1139,6 +1142,53 @@ def format_scan_for_display(scan_df: pd.DataFrame) -> pd.DataFrame:
     return display_df
 
 
+def format_per_stock_stats_for_display(stats_df: pd.DataFrame) -> pd.DataFrame:
+    if stats_df.empty:
+        return stats_df
+    display_df = stats_df.copy()
+    percent_cols = [
+        "total_return_pct",
+        "strategy_win_rate_pct",
+        "max_drawdown_pct",
+        "avg_mfe_pct",
+        "avg_mae_pct",
+        "trade_return_volatility_pct",
+    ]
+    number_cols = ["final_net_value", "avg_holding_days", "profit_risk_ratio"]
+    count_cols = ["executed_trades", "signal_count"]
+    for column in percent_cols:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(format_percent)
+    for column in number_cols:
+        if column in display_df.columns:
+            digits = 4 if column == "final_net_value" else 2
+            display_df[column] = display_df[column].map(
+                lambda value: format_number(value, digits=digits)
+            )
+    for column in count_cols:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(
+                lambda value: f"{int(value):,}" if pd.notna(value) else ""
+            )
+    display_df = display_df.rename(
+        columns={
+            "stock_code": "股票代码",
+            "signal_count": "信号数",
+            "executed_trades": "交易笔数",
+            "total_return_pct": "总收益率",
+            "strategy_win_rate_pct": "胜率",
+            "max_drawdown_pct": "最大回撤",
+            "final_net_value": "期末净值",
+            "avg_holding_days": "平均持有天数",
+            "profit_risk_ratio": "盈亏比",
+            "avg_mfe_pct": "平均最大有利波动",
+            "avg_mae_pct": "平均最大不利波动",
+            "trade_return_volatility_pct": "单笔收益波动率",
+        }
+    )
+    return display_df
+
+
 def format_update_log_for_display(preview_df: pd.DataFrame) -> pd.DataFrame:
     if preview_df.empty:
         return preview_df
@@ -1918,6 +1968,12 @@ stock_scope_text = st.sidebar.text_area(
     value="",
     help="多个代码可用逗号/空格/换行。留空表示全市场。",
     key="stock_scope_text",
+)
+batch_backtest_mode_label = st.sidebar.radio(
+    "多股票回测模式",
+    options=["组合回测（单账户）", "逐股独立回测（批量）"],
+    index=0,
+    help="逐股独立回测会对股票池中的每只股票单独回测，不合并持仓与资金曲线。",
 )
 if "backtest_start_date" not in st.session_state:
     st.session_state["backtest_start_date"] = default_backtest_start
@@ -2955,6 +3011,13 @@ if submitted:
         ):
             errors.append(f"找不到文件：{input_file_path}")
 
+    is_batch_per_stock_mode = batch_backtest_mode_label == "逐股独立回测（批量）"
+    if is_batch_per_stock_mode:
+        if params.entry_factor not in {"gap", "trend_breakout"}:
+            errors.append("逐股独立回测当前仅支持 gap 与 trend_breakout。")
+        if len(params.stock_codes) < 2:
+            errors.append("逐股独立回测请在股票池至少输入 2 只股票代码。")
+
     if errors:
         st.error("参数校验失败")
         for error in errors:
@@ -2984,7 +3047,106 @@ if submitted:
                 )
                 scan_df = pd.DataFrame()
                 best_scan_overrides: dict[str, int | float] = {}
-                if params.scan_config.enabled:
+                per_stock_stats_df = pd.DataFrame()
+                if is_batch_per_stock_mode:
+                    batch_detail_frames: list[pd.DataFrame] = []
+                    batch_daily_frames: list[pd.DataFrame] = []
+                    batch_equity_frames: list[pd.DataFrame] = []
+                    batch_rows: list[dict[str, Any]] = []
+                    for stock_code in params.stock_codes:
+                        single_params = replace(
+                            params,
+                            stock_codes=(stock_code,),
+                            scan_config=replace(params.scan_config, enabled=False, axes=()),
+                        )
+                        stock_data = all_data.loc[
+                            all_data["stock_code"].astype(str) == str(stock_code)
+                        ].copy()
+                        (
+                            single_detail_df,
+                            single_daily_df,
+                            single_equity_df,
+                            single_stats,
+                        ) = analyze_all_stocks(stock_data, single_params)
+                        if not single_detail_df.empty:
+                            single_detail_df = single_detail_df.copy()
+                            single_detail_df["batch_stock_code"] = stock_code
+                            batch_detail_frames.append(single_detail_df)
+                        if not single_daily_df.empty:
+                            single_daily_df = single_daily_df.copy()
+                            single_daily_df["batch_stock_code"] = stock_code
+                            batch_daily_frames.append(single_daily_df)
+                        if not single_equity_df.empty:
+                            single_equity_df = single_equity_df.copy()
+                            single_equity_df["batch_stock_code"] = stock_code
+                            batch_equity_frames.append(single_equity_df)
+                        batch_rows.append(
+                            {
+                                "stock_code": stock_code,
+                                "signal_count": int(single_stats.get("signal_count", 0)),
+                                "executed_trades": int(
+                                    single_stats.get("executed_trades", 0)
+                                ),
+                                "total_return_pct": float(
+                                    single_stats.get("total_return_pct", 0.0)
+                                ),
+                                "strategy_win_rate_pct": float(
+                                    single_stats.get("strategy_win_rate_pct", 0.0)
+                                ),
+                                "max_drawdown_pct": float(
+                                    single_stats.get("max_drawdown_pct", 0.0)
+                                ),
+                                "final_net_value": float(
+                                    single_stats.get("final_net_value", 1.0)
+                                ),
+                                "avg_holding_days": float(
+                                    single_stats.get("avg_holding_days", 0.0)
+                                ),
+                                "profit_risk_ratio": float(
+                                    single_stats.get("profit_risk_ratio", 0.0)
+                                ),
+                                "avg_mfe_pct": float(single_stats.get("avg_mfe_pct", 0.0)),
+                                "avg_mae_pct": float(single_stats.get("avg_mae_pct", 0.0)),
+                                "trade_return_volatility_pct": float(
+                                    single_stats.get("trade_return_volatility_pct", 0.0)
+                                ),
+                            }
+                        )
+                    detail_df = (
+                        pd.concat(batch_detail_frames, ignore_index=True)
+                        if batch_detail_frames
+                        else pd.DataFrame()
+                    )
+                    daily_df = (
+                        pd.concat(batch_daily_frames, ignore_index=True)
+                        if batch_daily_frames
+                        else pd.DataFrame()
+                    )
+                    equity_df = (
+                        pd.concat(batch_equity_frames, ignore_index=True)
+                        if batch_equity_frames
+                        else pd.DataFrame()
+                    )
+                    per_stock_stats_df = pd.DataFrame(batch_rows)
+                    if per_stock_stats_df.empty:
+                        stats = {}
+                    else:
+                        stats = {
+                            "total_return_pct": float(
+                                per_stock_stats_df["total_return_pct"].mean()
+                            ),
+                            "strategy_win_rate_pct": float(
+                                per_stock_stats_df["strategy_win_rate_pct"].mean()
+                            ),
+                            "max_drawdown_pct": float(
+                                per_stock_stats_df["max_drawdown_pct"].mean()
+                            ),
+                            "executed_trades": int(
+                                per_stock_stats_df["executed_trades"].sum()
+                            ),
+                            "signal_count": int(per_stock_stats_df["signal_count"].sum()),
+                        }
+                elif params.scan_config.enabled:
                     (
                         scan_df,
                         detail_df,
@@ -3020,6 +3182,10 @@ if submitted:
                 axis.field_name for axis in params.scan_config.axes
             ]
             st.session_state["best_scan_overrides"] = best_scan_overrides
+            st.session_state["per_stock_stats_df"] = per_stock_stats_df
+            st.session_state["batch_backtest_mode"] = (
+                "per_stock" if is_batch_per_stock_mode else "combined"
+            )
             st.session_state["excel_bytes"] = excel_bytes
             st.session_state["download_name"] = build_download_name(
                 params.start_date, params.end_date
@@ -3041,6 +3207,8 @@ scan_df = st.session_state.get("scan_df", pd.DataFrame())
 scan_metric = str(st.session_state.get("scan_metric", "total_return_pct"))
 scan_axis_fields = list(st.session_state.get("scan_axis_fields", []))
 best_scan_overrides = dict(st.session_state.get("best_scan_overrides", {}))
+per_stock_stats_df = st.session_state.get("per_stock_stats_df", pd.DataFrame())
+batch_backtest_mode = str(st.session_state.get("batch_backtest_mode", "combined"))
 
 if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
     tab_names = ["📊 绩效总览", "📈 资金曲线", "📝 交易明细"]
@@ -3050,11 +3218,26 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
     tab_summary, tab_curve, tab_details = tabs[:3]
     with tab_summary:
         section_header("绩效总览", "先看关键结果，再决定是否继续展开明细或参数扫描。")
+        if (
+            batch_backtest_mode == "per_stock"
+            and isinstance(per_stock_stats_df, pd.DataFrame)
+            and not per_stock_stats_df.empty
+        ):
+            st.markdown("**逐股独立回测汇总**")
+            dataframe_stretch(
+                format_per_stock_stats_for_display(
+                    per_stock_stats_df.sort_values("total_return_pct", ascending=False)
+                ),
+                hide_index=True,
+                height=260,
+            )
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("总收益率", f"{float(stats.get('total_return_pct', 0.0)):.2f}%")
-        c2.metric("胜率", f"{float(stats.get('strategy_win_rate_pct', 0.0)):.2f}%")
-        c3.metric("最大回撤", f"{float(stats.get('max_drawdown_pct', 0.0)):.2f}%")
-        c4.metric("交易笔数", f"{int(stats.get('executed_trades', len(detail_df)))}")
+        c1.metric("总收益率", format_percent(float(stats.get("total_return_pct", 0.0))))
+        c2.metric(
+            "胜率", format_percent(float(stats.get("strategy_win_rate_pct", 0.0)))
+        )
+        c3.metric("最大回撤", format_percent(float(stats.get("max_drawdown_pct", 0.0))))
+        c4.metric("交易笔数", f"{int(stats.get('executed_trades', len(detail_df))):,}")
         skip_metric_cols = st.columns(2)
         skip_metric_cols[0].metric(
             "开仓未成交跳过", f"{int(stats.get('skipped_entry_not_filled', 0))}"
