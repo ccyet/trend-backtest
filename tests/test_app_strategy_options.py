@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 from streamlit.testing.v1 import AppTest
@@ -20,8 +21,9 @@ def test_app_exposes_new_strategy_modes_and_intraday_timeframe_support() -> None
     assert timeframe.label == "周期"
     assert timeframe.options == ["1d", "30m", "15m", "5m"]
 
-    update_timeframe = app.selectbox(key="offline_update_timeframe")
+    update_timeframe = app.multiselect(key="offline_update_timeframe")
     assert update_timeframe.options == ["1d", "30m", "15m", "5m"]
+    assert update_timeframe.value == ["1d"]
 
     captions = [caption.value for caption in app.caption]
     assert "1d 为常规日线；early_surge_high_base 使用 30m 形态并自动切换到 5m 执行。" in captions
@@ -165,6 +167,7 @@ def test_app_exposes_eshb_controls_and_scan_fields() -> None:
 
 def test_app_exposes_backtest_date_presets_and_applies_shortcut() -> None:
     today = pd.Timestamp.today().date()
+    ytd_start = today.replace(month=1, day=1)
     try:
         expected_start = today.replace(year=today.year - 10)
     except ValueError:
@@ -178,12 +181,123 @@ def test_app_exposes_backtest_date_presets_and_applies_shortcut() -> None:
     assert "7年至今" in button_labels
     assert "5年至今" in button_labels
     assert "3年至今" in button_labels
+    assert "YTD" in button_labels
 
     app.button(key="backtest_preset_10y").click()
     app.run()
 
     assert app.date_input(key="backtest_start_date").value == expected_start
     assert app.date_input(key="backtest_end_date").value == today
+
+    app.button(key="backtest_preset_ytd").click()
+    app.run()
+
+    assert app.date_input(key="backtest_start_date").value == ytd_start
+    assert app.date_input(key="backtest_end_date").value == today
+
+
+def test_app_exposes_major_index_presets_and_can_fill_stock_scope() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    button_labels = [widget.label for widget in app.button]
+    assert "沪深300" in button_labels
+    assert "创业板指" in button_labels
+    assert "中证1000" in button_labels
+    assert "中证500" in button_labels
+    assert "上证50" in button_labels
+
+    app.button(key="stock_scope_preset_hs300").click()
+    app.run()
+    assert app.text_area(key="stock_scope_text").value == "000300.SH"
+
+    app.button(key="stock_scope_preset_cyb").click()
+    app.run()
+    assert app.text_area(key="stock_scope_text").value == "000300.SH,399006.SZ"
+
+    app.button(key="stock_scope_preset_hs300").click()
+    app.run()
+    assert app.text_area(key="stock_scope_text").value == "000300.SH,399006.SZ"
+
+
+def test_app_exposes_data_prep_shortcuts_and_applies_to_update_inputs() -> None:
+    today = pd.Timestamp.today().date()
+    ytd_start = today.replace(month=1, day=1)
+    try:
+        expected_start = today.replace(year=today.year - 10)
+    except ValueError:
+        expected_start = today.replace(year=today.year - 10, month=2, day=28)
+
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    app.button(key="offline_update_symbol_preset_hs300").click()
+    app.run()
+    assert app.text_area(key="offline_update_symbols").value == "000300.SH"
+
+    app.button(key="offline_update_symbol_preset_cyb").click()
+    app.run()
+    assert app.text_area(key="offline_update_symbols").value == "000300.SH,399006.SZ"
+
+    app.button(key="offline_update_symbol_preset_hs300").click()
+    app.run()
+    assert app.text_area(key="offline_update_symbols").value == "000300.SH,399006.SZ"
+
+    app.button(key="offline_update_preset_10y").click()
+    app.run()
+    assert app.date_input(key="offline_update_start").value == expected_start
+    assert app.date_input(key="offline_update_end").value == today
+
+    app.button(key="offline_update_preset_ytd").click()
+    app.run()
+    assert app.date_input(key="offline_update_start").value == ytd_start
+    assert app.date_input(key="offline_update_end").value == today
+
+
+def test_app_passes_tdx_tqcenter_path_to_update_subprocess(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeResult:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(cmd, capture_output, text, env=None):
+        captured["cmd"] = cmd
+        captured["capture_output"] = capture_output
+        captured["text"] = text
+        captured["env"] = env
+        return _FakeResult()
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    install_root = str(tmp_path / "TdxInstall")
+    app.session_state["tdx_tqcenter_path"] = install_root
+    app.session_state["tdx_tqcenter_path_display"] = install_root
+    app.multiselect(key="offline_update_timeframe").set_value(["1d", "30m"])
+
+    app.button(key="offline_update_submit").click()
+    app.run()
+
+    assert captured["capture_output"] is True
+    assert captured["text"] is True
+    assert isinstance(captured["env"], dict)
+    assert cast(dict[str, str], captured["env"])["TDX_TQCENTER_PATH"] == str(
+        (tmp_path / "TdxInstall" / "PYPlugins" / "user")
+    )
+
+    cmd = cast(list[str], captured["cmd"])
+    timeframe_values = [
+        cmd[index + 1]
+        for index, token in enumerate(cmd)
+        if token == "--timeframe" and index + 1 < len(cmd)
+    ]
+    assert timeframe_values == ["1d", "30m"]
 
 
 def test_app_can_run_candle_run_acceleration_backtest_with_local_parquet(
@@ -229,3 +343,85 @@ def test_app_can_run_candle_run_acceleration_backtest_with_local_parquet(
     assert any(
         metric.label == "交易笔数" and str(metric.value) == "1" for metric in app.metric
     )
+
+
+def _seed_result_state_for_curve_caption(
+    app: AppTest,
+    *,
+    batch_backtest_mode: str,
+    equity_df: pd.DataFrame,
+) -> None:
+    app.session_state["detail_df"] = pd.DataFrame(
+        {
+            "date": [pd.Timestamp("2024-01-02")],
+            "sell_date": [pd.Timestamp("2024-01-03")],
+            "stock_code": ["000001.SZ"],
+        }
+    )
+    app.session_state["daily_df"] = pd.DataFrame()
+    app.session_state["equity_df"] = equity_df
+    app.session_state["trade_behavior_df"] = pd.DataFrame()
+    app.session_state["drawdown_episodes_df"] = pd.DataFrame()
+    app.session_state["drawdown_contributors_df"] = pd.DataFrame()
+    app.session_state["anomaly_queue_df"] = pd.DataFrame()
+    app.session_state["stats"] = {}
+    app.session_state["scan_df"] = pd.DataFrame()
+    app.session_state["scan_metric"] = "total_return_pct"
+    app.session_state["scan_axis_fields"] = []
+    app.session_state["best_scan_overrides"] = {}
+    app.session_state["per_stock_stats_df"] = pd.DataFrame()
+    app.session_state["batch_backtest_mode"] = batch_backtest_mode
+    app.session_state["excel_bytes"] = b"dummy"
+    app.session_state["download_name"] = "test.xlsx"
+
+
+def test_app_curve_caption_mentions_legend_when_grouped_traces_are_available() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    _seed_result_state_for_curve_caption(
+        app,
+        batch_backtest_mode="per_stock",
+        equity_df=pd.DataFrame(
+            {
+                "date": [
+                    pd.Timestamp("2024-01-01"),
+                    pd.Timestamp("2024-01-02"),
+                    pd.Timestamp("2024-01-01"),
+                    pd.Timestamp("2024-01-02"),
+                ],
+                "net_value": [1.0, 1.1, 1.0, 0.95],
+                "batch_stock_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],
+            }
+        ),
+    )
+    app.run()
+
+    captions = [caption.value for caption in app.caption]
+    assert "逐股独立回测时，图例会按标的区分各条净值曲线；下表保留原始净值序列，适合与图形交叉核对。" in captions
+
+    plotly_proto = str(app.get("plotly_chart")[0].proto)
+    assert "000001.SZ" in plotly_proto
+    assert "000002.SZ" in plotly_proto
+    assert 'hovermode\\":\\"x unified\\"' in plotly_proto
+
+
+def test_app_curve_caption_falls_back_when_per_stock_mode_has_no_batch_labels() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    _seed_result_state_for_curve_caption(
+        app,
+        batch_backtest_mode="per_stock",
+        equity_df=pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")],
+                "net_value": [1.0, 1.1],
+            }
+        ),
+    )
+    app.run()
+
+    captions = [caption.value for caption in app.caption]
+    assert "下表保留原始净值序列，适合与图形交叉核对。" in captions
+    assert "逐股独立回测时，图例会按标的区分各条净值曲线；下表保留原始净值序列，适合与图形交叉核对。" not in captions

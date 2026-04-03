@@ -133,6 +133,11 @@ def test_resolve_local_data_root_switches_default_daily_root_for_intraday_socket
     assert resolved == tmp_path / "data" / "market" / "30m"
 
 
+def test_resolve_local_data_root_switches_default_daily_root_for_1m_socket(tmp_path: Path):
+    resolved = resolve_local_data_root(str(tmp_path / "data" / "market" / "daily"), "1m")
+    assert resolved == tmp_path / "data" / "market" / "1m"
+
+
 def test_local_parquet_loader_uses_timeframe_resolved_root(tmp_path: Path):
     import pytest
 
@@ -205,3 +210,39 @@ def test_local_parquet_loader_prefers_inventory_symbols_when_stock_pool_empty(tm
     )
 
     assert out["stock_code"].tolist() == ["000777.SZ"]
+
+
+def test_local_parquet_loader_reads_1m_from_resolved_root(tmp_path: Path):
+    import pytest
+
+    pytest.importorskip("pyarrow")
+    intraday_root = tmp_path / "market" / "1m"
+    qfq = intraday_root / "qfq"
+    qfq.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        {
+            "date": ["2024-01-02 09:30:00", "2024-01-02 09:31:00"],
+            "symbol": ["000001.SZ", "000001.SZ"],
+            "open": [10.0, 10.1],
+            "high": [10.2, 10.3],
+            "low": [9.9, 10.0],
+            "close": [10.1, 10.2],
+            "volume": [100, 110],
+        }
+    ).to_parquet(qfq / "000001.SZ.parquet", index=False)
+
+    out = load_local_parquet_data(
+        "2024-01-02",
+        "2024-01-02",
+        stock_codes=("000001.SZ",),
+        local_data_root=str(tmp_path / "market" / "daily"),
+        adjust="qfq",
+        timeframe="1m",
+    )
+
+    assert len(out) == 2
+    assert list(out["date"]) == [
+        pd.Timestamp("2024-01-02 09:30:00"),
+        pd.Timestamp("2024-01-02 09:31:00"),
+    ]

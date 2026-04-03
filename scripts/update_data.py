@@ -13,14 +13,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.providers.akshare_provider import AkshareProvider
+from data.providers.tdx_quant_provider import TdxQuantProvider
 from data.services.local_inventory_service import upsert_inventory_row
 from data_loader import resolve_local_data_root
 CONFIG_PATH = ROOT / "config" / "data_source.yaml"
 METADATA_DIR = ROOT / "data" / "market" / "metadata"
 UPDATE_LOG_PATH = METADATA_DIR / "update_log.parquet"
 SYMBOLS_PATH = METADATA_DIR / "symbols.parquet"
-TIMEFRAME_EXPORT_DIR = {"1d": "daily", "30m": "30m", "15m": "15m", "5m": "5m"}
-TIMEFRAME_BACKFILL_DAYS = {"1d": 30, "30m": 10, "15m": 7, "5m": 5}
+TIMEFRAME_EXPORT_DIR = {"1d": "daily", "30m": "30m", "15m": "15m", "5m": "5m", "1m": "1m"}
+TIMEFRAME_BACKFILL_DAYS = {"1d": 30, "30m": 10, "15m": 7, "5m": 5, "1m": 3}
 
 
 def read_config() -> dict[str, str]:
@@ -164,6 +165,44 @@ def _dataframes_equivalent(left: pd.DataFrame, right: pd.DataFrame) -> bool:
             comparable_right[column] = pd.to_datetime(comparable_right[column], errors="coerce")
     return comparable_left.equals(comparable_right)
 
+
+def _format_exception_message(exc: BaseException) -> str:
+    parts: list[str] = []
+    seen_ids: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen_ids:
+        seen_ids.add(id(current))
+        detail = str(current).strip()
+        parts.append(f"{current.__class__.__name__}: {detail}" if detail else current.__class__.__name__)
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return " <- ".join(parts)
+
+
+def _fetch_bars_for_timeframe(
+    *,
+    symbol: str,
+    timeframe: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+) -> pd.DataFrame:
+    if timeframe in {"1m", "5m"}:
+        return TdxQuantProvider.fetch_bars(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_date=start_date,
+            end_date=end_date,
+            adjust=adjust,
+        )
+
+    return AkshareProvider.fetch_bars(
+        symbol=symbol,
+        timeframe=timeframe,
+        start_date=start_date,
+        end_date=end_date,
+        adjust=adjust,
+    )
+
 def update_one_symbol(
     symbol: str,
     start_date: str,
@@ -172,7 +211,7 @@ def update_one_symbol(
     local_root: Path,
     export_excel: bool,
     timeframe: str = "1d",
-) -> None:
+) -> bool:
     standardized_symbol = AkshareProvider.to_standard_symbol(symbol)
     symbol_path = local_root / adjust / f"{standardized_symbol}.parquet"
     symbol_path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,7 +230,7 @@ def update_one_symbol(
             existing["date"] = pd.to_datetime(existing["date"], errors="coerce")
             fetch_start = _resolve_incremental_start(start_date, existing, timeframe)
 
-        raw = AkshareProvider.fetch_bars(
+        raw = _fetch_bars_for_timeframe(
             symbol=standardized_symbol,
             timeframe=timeframe,
             start_date=fetch_start,
@@ -217,7 +256,7 @@ def update_one_symbol(
             _export_symbol_to_excel(standardized_symbol, adjust, local_root, timeframe)
     except Exception as exc:  # noqa: BLE001
         status = "failed"
-        error_message = str(exc)
+        error_message = _format_exception_message(exc)
         if symbol_path.exists():
             try:
                 final_df = pd.read_parquet(symbol_path)
@@ -249,6 +288,7 @@ def update_one_symbol(
             updated_at=updated_at,
         )
     )
+    return status == "success"
 
 
 def update_symbol_metadata() -> None:
@@ -260,12 +300,19 @@ def update_symbol_metadata() -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="离线更新 AKShare A 股行情到本地 parquet")
+    parser = argparse.ArgumentParser(description="离线更新 A 股行情到本地 parquet")
     parser.add_argument("--symbols", type=str, default="", help="逗号分隔标准代码，如 000001.SZ,600519.SH；留空则按 symbols.parquet 全量更新")
     parser.add_argument("--start-date", type=str, default="20100101", help="起始日期，支持 YYYYMMDD 或 YYYY-MM-DD")
     parser.add_argument("--end-date", type=str, default=datetime.now().strftime("%Y%m%d"), help="结束日期")
     parser.add_argument("--adjust", type=str, default="", choices=["", "qfq", "hfq"], help="复权类型，默认读取配置")
-    parser.add_argument("--timeframe", type=str, default="1d", choices=["1d", "30m", "15m", "5m"], help="更新周期")
+    parser.add_argument(
+        "--timeframe",
+        type=str,
+        action="append",
+        choices=["1d", "30m", "15m", "5m", "1m"],
+        default=None,
+        help="更新周期，可重复传参：--timeframe 1d --timeframe 30m",
+    )
     parser.add_argument("--refresh-symbols", action="store_true", help="先刷新股票列表 metadata")
     parser.add_argument("--export-excel", action="store_true", help="更新完成后把对应 symbol 另存为 Excel")
     return parser.parse_args()
@@ -275,13 +322,27 @@ def _normalize_date(date_text: str) -> str:
     return pd.to_datetime(date_text).strftime("%Y-%m-%d")
 
 
+def _normalize_timeframes(timeframes: list[str] | None) -> list[str]:
+    if not timeframes:
+        return ["1d"]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for timeframe in timeframes:
+        normalized = str(timeframe).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped or ["1d"]
+
+
 def main() -> None:
     args = parse_args()
     config = read_config()
     if config["data_source"] != "local_parquet":
         raise ValueError("当前仅支持 local_parquet 数据源")
 
-    local_root = resolve_local_data_root(str(ROOT / config["local_data_root"]), args.timeframe)
+    selected_timeframes = _normalize_timeframes(cast(list[str] | None, args.timeframe))
     adjust = args.adjust or config["default_adjust"]
     start_date = _normalize_date(args.start_date)
     end_date = _normalize_date(args.end_date)
@@ -299,15 +360,27 @@ def main() -> None:
             symbol_series = pd.Series(dtype=str)
         symbols = [AkshareProvider.to_standard_symbol(symbol) for symbol in symbol_series.tolist()]
 
-    for symbol in symbols:
-        update_one_symbol(
-            symbol=symbol,
-            start_date=start_date,
-            end_date=end_date,
-            adjust=adjust,
-            local_root=local_root,
-            export_excel=bool(args.export_excel),
-            timeframe=str(args.timeframe),
+    for timeframe in selected_timeframes:
+        local_root = resolve_local_data_root(str(ROOT / config["local_data_root"]), timeframe)
+        success_count = 0
+        failed_count = 0
+        print(f"[timeframe={timeframe}] 开始更新，共 {len(symbols)} 只标的")
+        for symbol in symbols:
+            ok = update_one_symbol(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+                local_root=local_root,
+                export_excel=bool(args.export_excel),
+                timeframe=timeframe,
+            )
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+        print(
+            f"[timeframe={timeframe}] 更新完成：success={success_count}, failed={failed_count}, total={len(symbols)}"
         )
 
 

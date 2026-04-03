@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, timedelta
 from io import BytesIO
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -247,6 +248,13 @@ BACKTEST_RANGE_PRESETS = (
     ("7年至今", 7),
     ("5年至今", 5),
     ("3年至今", 3),
+)
+MAJOR_INDEX_PRESETS = (
+    ("沪深300", "000300.SH", "hs300"),
+    ("创业板指", "399006.SZ", "cyb"),
+    ("中证1000", "000852.SH", "zz1000"),
+    ("中证500", "000905.SH", "zz500"),
+    ("上证50", "000016.SH", "sz50"),
 )
 ENTRY_FACTOR_LABELS = {
     "gap": "跳空",
@@ -554,6 +562,135 @@ def preset_start_date(today: date, years: int) -> date:
         return today.replace(year=today.year - years_int)
     except ValueError:
         return today.replace(year=today.year - years_int, month=2, day=28)
+
+
+def ytd_start_date(today: date) -> date:
+    return today.replace(month=1, day=1)
+
+
+@st.cache_data(show_spinner=False)
+def load_symbol_name_map() -> dict[str, str]:
+    symbol_file = Path("data/market/metadata/symbols.parquet")
+    if not symbol_file.exists():
+        return {}
+    try:
+        symbol_df = pd.read_parquet(symbol_file)
+    except Exception:
+        return {}
+
+    symbol_col = next(
+        (
+            column
+            for column in ("symbol", "stock_code", "code")
+            if column in symbol_df.columns
+        ),
+        None,
+    )
+    name_col = next(
+        (
+            column
+            for column in ("name", "symbol_name", "display_name")
+            if column in symbol_df.columns
+        ),
+        None,
+    )
+    if symbol_col is None or name_col is None:
+        return {}
+
+    symbol_name_map: dict[str, str] = {}
+    for row in symbol_df.to_dict("records"):
+        symbol_text = str(row.get(symbol_col, "")).strip()
+        name_text = str(row.get(name_col, "")).strip()
+        if symbol_text and name_text:
+            symbol_name_map[symbol_text.upper()] = name_text
+    return symbol_name_map
+
+
+def build_display_symbol_label(
+    symbol: Any,
+    symbol_name_map: dict[str, str] | None = None,
+) -> str:
+    symbol_text = str(symbol).strip() if pd.notna(symbol) else ""
+    if not symbol_text:
+        return ""
+    lookup_map = symbol_name_map or {}
+    symbol_name = str(lookup_map.get(symbol_text.upper(), "") or "").strip()
+    if not symbol_name:
+        return symbol_text
+    return f"{symbol_name}（{symbol_text}）"
+
+
+def apply_symbol_text_preset(state_key: str, symbol_code: str) -> None:
+    st.session_state[state_key] = symbol_code
+
+
+def merge_symbol_text_preset(state_key: str, symbol_code: str) -> None:
+    existing_codes = normalize_stock_codes(str(st.session_state.get(state_key, "")))
+    preset_codes = normalize_stock_codes(symbol_code)
+
+    merged_codes: list[str] = []
+    seen: set[str] = set()
+    for code in [*existing_codes, *preset_codes]:
+        if code in seen:
+            continue
+        seen.add(code)
+        merged_codes.append(code)
+
+    st.session_state[state_key] = ",".join(merged_codes)
+
+
+def apply_stock_scope_preset(symbol_code: str) -> None:
+    merge_symbol_text_preset("stock_scope_text", symbol_code)
+
+
+def apply_offline_update_scope_preset(symbol_code: str) -> None:
+    merge_symbol_text_preset("offline_update_symbols", symbol_code)
+
+
+def pick_tdx_tqcenter_path(current_path: str) -> tuple[str, str | None]:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        initial_dir = current_path.strip() or str(Path.home())
+        selected_dir = filedialog.askdirectory(
+            title="选择通达信安装目录",
+            initialdir=initial_dir,
+            mustexist=True,
+        )
+        root.destroy()
+        if selected_dir:
+            return str(Path(selected_dir)), None
+        return current_path, None
+    except Exception as exc:  # noqa: BLE001
+        return (
+            current_path,
+            f"无法打开目录选择窗口：{exc}。可继续使用当前路径或稍后重试。",
+        )
+
+
+def normalize_tdx_tqcenter_path(path_text: str) -> str:
+    cleaned = path_text.strip().strip('"')
+    if not cleaned:
+        return ""
+
+    candidate = Path(cleaned).expanduser()
+    if candidate.name.lower() == "tqcenter.py":
+        return str(candidate.parent)
+    if candidate.name.lower() == "user" and candidate.parent.name.lower() == "pyplugins":
+        return str(candidate)
+    if candidate.name.lower() == "pyplugins":
+        return str(candidate / "user")
+    if (candidate / "tqcenter.py").exists():
+        return str(candidate)
+    return str(candidate / "PYPlugins" / "user")
 
 
 def get_direction_options(entry_factor: str) -> list[str]:
@@ -1005,13 +1142,24 @@ def format_drawdown_contributors_for_display(
     )
 
 
-def format_anomaly_queue_for_display(anomaly_df: pd.DataFrame) -> pd.DataFrame:
+def format_anomaly_queue_for_display(
+    anomaly_df: pd.DataFrame,
+    *,
+    symbol_name_map: dict[str, str] | None = None,
+) -> pd.DataFrame:
     if anomaly_df.empty:
         return anomaly_df
 
     display_df = anomaly_df.copy()
     if "date" in display_df.columns:
         display_df["date"] = display_df["date"].map(format_timestamp_for_display)
+    if "stock_code" in display_df.columns:
+        resolved_symbol_name_map = (
+            symbol_name_map if symbol_name_map is not None else load_symbol_name_map()
+        )
+        display_df["stock_code"] = display_df["stock_code"].map(
+            lambda value: build_display_symbol_label(value, resolved_symbol_name_map)
+        )
     for column in ANOMALY_PERCENT_COLUMNS:
         if column in display_df.columns:
             display_df[column] = display_df[column].map(format_percent)
@@ -1466,9 +1614,10 @@ def run_local_data_update(
     start_date: str,
     end_date: str,
     adjust: str,
-    timeframe: str,
+    timeframes: list[str],
     refresh_symbols: bool,
     export_excel: bool,
+    tdx_tqcenter_path: str = "",
 ) -> tuple[bool, str]:
     cmd = [
         sys.executable,
@@ -1480,7 +1629,17 @@ def run_local_data_update(
     ]
     if adjust:
         cmd.extend(["--adjust", adjust])
-    if timeframe:
+    normalized_timeframes = [str(item).strip() for item in timeframes if str(item).strip()]
+    if not normalized_timeframes:
+        normalized_timeframes = ["1d"]
+    deduped_timeframes: list[str] = []
+    seen_timeframes: set[str] = set()
+    for timeframe in normalized_timeframes:
+        if timeframe in seen_timeframes:
+            continue
+        seen_timeframes.add(timeframe)
+        deduped_timeframes.append(timeframe)
+    for timeframe in deduped_timeframes:
         cmd.extend(["--timeframe", timeframe])
     if symbols_text.strip():
         cmd.extend(["--symbols", symbols_text.strip()])
@@ -1489,7 +1648,13 @@ def run_local_data_update(
     if export_excel:
         cmd.append("--export-excel")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    env = None
+    normalized_tqcenter_path = normalize_tdx_tqcenter_path(tdx_tqcenter_path)
+    if normalized_tqcenter_path:
+        env = dict(os.environ)
+        env["TDX_TQCENTER_PATH"] = normalized_tqcenter_path
+
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
     return result.returncode == 0, output.strip()
 
@@ -1876,67 +2041,136 @@ today = pd.Timestamp.today().date()
 default_update_start = today - timedelta(days=30)
 default_backtest_start = today - timedelta(days=365)
 
-section_header(
-    "数据准备",
-    "推荐先离线更新本地 parquet，再进行回测；更新区保留在顶部，避免与回测配置混在一起。",
-)
-
-with st.expander("本地行情更新（离线下载）", expanded=False):
-    up_c1, up_c2, up_c3 = st.columns(3)
-    with up_c1:
-        update_symbols = st.text_area(
-            "股票代码（可选）", value="", help="多个代码用逗号分隔，空表示全量。"
+# ===== Sidebar: 基础参数 =====
+st.sidebar.header("运行设置")
+st.sidebar.caption("左侧聚焦回测范围与数据源选择，详细规则放在主区域。")
+with st.sidebar.expander("数据准备", expanded=False):
+    st.caption("推荐先离线更新本地 parquet，再进行回测。")
+    update_symbols = st.text_area(
+        "股票代码（可选）",
+        value="",
+        help="多个代码用逗号分隔，空表示全量。",
+        key="offline_update_symbols",
+    )
+    st.caption("常用指数")
+    update_index_cols_top = st.columns(3)
+    update_index_cols_bottom = st.columns(2)
+    for button_col, (index_name, index_code, index_key) in zip(
+        [*update_index_cols_top, *update_index_cols_bottom], MAJOR_INDEX_PRESETS
+    ):
+        button_col.button(
+            index_name,
+            key=f"offline_update_symbol_preset_{index_key}",
+            use_container_width=True,
+            on_click=apply_offline_update_scope_preset,
+            args=(index_code,),
         )
-    with up_c2:
-        update_start = st.date_input(
-            "更新开始日期",
-            value=default_update_start,
-            key="offline_update_start",
+    if "tdx_tqcenter_path" not in st.session_state:
+        st.session_state["tdx_tqcenter_path"] = ""
+    if "tdx_tqcenter_path_display" not in st.session_state:
+        st.session_state["tdx_tqcenter_path_display"] = st.session_state[
+            "tdx_tqcenter_path"
+        ]
+    st.caption("通达信安装目录（用于 1m / 5m 数据更新）")
+    picker_cols = st.columns(2)
+    if picker_cols[0].button(
+        "选择通达信目录",
+        key="pick_tdx_install_dir",
+        use_container_width=True,
+    ):
+        selected_path, picker_warning = pick_tdx_tqcenter_path(
+            str(st.session_state.get("tdx_tqcenter_path", ""))
         )
-        update_end = st.date_input(
-            "更新结束日期", value=today, key="offline_update_end"
-        )
-    with up_c3:
-        update_timeframe = st.selectbox(
+        st.session_state["tdx_tqcenter_path"] = selected_path
+        st.session_state["tdx_tqcenter_path_display"] = selected_path
+        if picker_warning:
+            st.warning(picker_warning)
+    if picker_cols[1].button(
+        "清空目录",
+        key="clear_tdx_install_dir",
+        use_container_width=True,
+    ):
+        st.session_state["tdx_tqcenter_path"] = ""
+        st.session_state["tdx_tqcenter_path_display"] = ""
+    st.text_input(
+        "已选择目录",
+        key="tdx_tqcenter_path_display",
+        disabled=True,
+        help="通过上方按钮选择目录后，这里会展示当前用于 TDX_TQCENTER_PATH 的路径。",
+    )
+    if "offline_update_start" not in st.session_state:
+        st.session_state["offline_update_start"] = default_update_start
+    if "offline_update_end" not in st.session_state:
+        st.session_state["offline_update_end"] = today
+    st.caption("快捷区间")
+    update_preset_cols_top = st.columns(2)
+    update_preset_cols_bottom = st.columns(2)
+    update_preset_col_ytd = st.columns(1)
+    for button_col, (preset_label, years) in zip(
+        [*update_preset_cols_top, *update_preset_cols_bottom], BACKTEST_RANGE_PRESETS
+    ):
+        if button_col.button(
+            preset_label,
+            key=f"offline_update_preset_{years}y",
+            use_container_width=True,
+        ):
+            st.session_state["offline_update_start"] = preset_start_date(today, years)
+            st.session_state["offline_update_end"] = today
+    if update_preset_col_ytd[0].button(
+        "YTD", key="offline_update_preset_ytd", use_container_width=True
+    ):
+        st.session_state["offline_update_start"] = ytd_start_date(today)
+        st.session_state["offline_update_end"] = today
+    update_date_cols = st.columns(2)
+    update_start = update_date_cols[0].date_input("更新开始日期", key="offline_update_start")
+    update_end = update_date_cols[1].date_input("更新结束日期", key="offline_update_end")
+    update_option_cols = st.columns(2)
+    with update_option_cols[0]:
+        update_timeframes = st.multiselect(
             "更新周期",
             options=list(TIMEFRAME_OPTIONS),
-            index=0,
+            default=["1d"],
             key="offline_update_timeframe",
-        )
-        update_adjust = st.selectbox(
-            "更新复权方式", options=["qfq", "hfq"], index=0, key="offline_update_adjust"
         )
         refresh_symbol_meta = st.checkbox(
             "刷新股票列表", value=False, key="offline_update_refresh"
         )
+    with update_option_cols[1]:
+        update_adjust = st.selectbox(
+            "更新复权方式", options=["qfq", "hfq"], index=0, key="offline_update_adjust"
+        )
         export_excel_after_update = st.checkbox(
             "更新后另存为 Excel", value=False, key="offline_update_export"
         )
-
     if st.button("开始更新本地数据", key="offline_update_submit"):
         ok, output = run_local_data_update(
             symbols_text=update_symbols,
             start_date=update_start.strftime("%Y-%m-%d"),
             end_date=update_end.strftime("%Y-%m-%d"),
             adjust=update_adjust,
-            timeframe=str(update_timeframe),
+            timeframes=[str(item) for item in update_timeframes],
             refresh_symbols=bool(refresh_symbol_meta),
             export_excel=bool(export_excel_after_update),
+            tdx_tqcenter_path=str(st.session_state.get("tdx_tqcenter_path", "")),
         )
         if ok:
             st.success("本地数据更新完成")
         else:
             st.error("本地数据更新失败")
         st.caption(
-            f"导出目录：{build_export_dir_hint(str(update_timeframe), str(update_adjust))}"
+            "导出目录："
+            + "、".join(
+                [
+                    build_export_dir_hint(str(timeframe), str(update_adjust))
+                    for timeframe in ([str(item) for item in update_timeframes] or ["1d"])
+                ]
+            )
         )
         if output:
             st.code(output)
-
     st.caption(
         "分钟级数据已支持 30m / 15m / 5m 更新；当前策略执行与展示仍以现有模型约束为主。"
     )
-
     preview = load_update_log_preview(limit=20)
     if not preview.empty:
         st.markdown("**最近更新日志**")
@@ -1946,7 +2180,6 @@ with st.expander("本地行情更新（离线下载）", expanded=False):
             column_config=build_update_log_column_config(),
             height=280,
         )
-
     inventory_preview = load_local_inventory_preview(limit=20)
     if not inventory_preview.empty:
         st.markdown("**本地数据 inventory**")
@@ -1957,11 +2190,6 @@ with st.expander("本地行情更新（离线下载）", expanded=False):
             height=280,
         )
 
-st.divider()
-
-# ===== Sidebar: 基础参数 =====
-st.sidebar.header("运行设置")
-st.sidebar.caption("左侧聚焦回测范围与数据源选择，详细规则放在主区域。")
 st.sidebar.markdown("**回测范围**")
 stock_scope_text = st.sidebar.text_area(
     "股票池",
@@ -1969,6 +2197,19 @@ stock_scope_text = st.sidebar.text_area(
     help="多个代码可用逗号/空格/换行。留空表示全市场。",
     key="stock_scope_text",
 )
+st.sidebar.caption("常用指数")
+index_preset_cols_top = st.sidebar.columns(3)
+index_preset_cols_bottom = st.sidebar.columns(2)
+for button_col, (index_name, index_code, index_key) in zip(
+    [*index_preset_cols_top, *index_preset_cols_bottom], MAJOR_INDEX_PRESETS
+):
+    button_col.button(
+        index_name,
+        key=f"stock_scope_preset_{index_key}",
+        use_container_width=True,
+        on_click=apply_stock_scope_preset,
+        args=(index_code,),
+    )
 batch_backtest_mode_label = st.sidebar.radio(
     "多股票回测模式",
     options=["组合回测（单账户）", "逐股独立回测（批量）"],
@@ -1982,6 +2223,7 @@ if "backtest_end_date" not in st.session_state:
 st.sidebar.caption("快捷区间")
 preset_cols_top = st.sidebar.columns(2)
 preset_cols_bottom = st.sidebar.columns(2)
+preset_col_ytd = st.sidebar.columns(1)
 for button_col, (preset_label, years) in zip(
     [*preset_cols_top, *preset_cols_bottom], BACKTEST_RANGE_PRESETS
 ):
@@ -1990,6 +2232,9 @@ for button_col, (preset_label, years) in zip(
     ):
         st.session_state["backtest_start_date"] = preset_start_date(today, years)
         st.session_state["backtest_end_date"] = today
+if preset_col_ytd[0].button("YTD", key="backtest_preset_ytd", use_container_width=True):
+    st.session_state["backtest_start_date"] = ytd_start_date(today)
+    st.session_state["backtest_end_date"] = today
 sidebar_date_cols = st.sidebar.columns(2)
 start_date = sidebar_date_cols[0].date_input("回测开始", key="backtest_start_date")
 end_date = sidebar_date_cols[1].date_input("回测结束", key="backtest_end_date")
@@ -2111,14 +2356,6 @@ with st.sidebar.expander(
     else:
         st.caption("当前使用本地 parquet 数据源，回测将直接读取本地目录。")
 
-submitted = st.sidebar.button("开始回测", type="primary", key="run_backtest")
-st.sidebar.caption("结果会在当前页面下方的标签页中展示。")
-
-# ===== 主界面：配置摘要 =====
-section_header(
-    "回测概览",
-    "先确认研究范围与数据来源，再进入规则配置；摘要区域只显示最关键状态。",
-)
 source_summary_title, source_summary_desc = summarize_data_source(
     data_source_label,
     adjust_label=adjust_label,
@@ -2139,83 +2376,85 @@ pre_backtest_source_summary = build_pre_backtest_source_summary(
     uploaded_market_file=uploaded_market_file,
     excel_sheet_name=str(excel_sheet_name or ""),
 )
-summary_cols = st.columns(3)
 current_entry_factor = str(st.session_state.get("entry_factor", "gap"))
 current_direction_label = normalize_direction_label(
     current_entry_factor,
     st.session_state.get("direction_label"),
 )
-summary_cols[0].metric(
-    "交易方向",
-    "做多"
-    if direction_label_to_internal(current_entry_factor, current_direction_label)
-    == "up"
-    else "做空",
-)
-summary_cols[1].metric("股票池", summarize_stock_scope(stock_scope_text))
-summary_cols[2].metric("回测区间", f"{start_date} → {end_date}")
-summary_cols_2 = st.columns(3)
-summary_cols_2[0].metric("数据源", source_summary_title, source_summary_desc)
-summary_cols_2[1].metric(
-    "分批退出",
-    "开启" if st.session_state.get("partial_exit_enabled", False) else "关闭",
-)
-summary_cols_2[2].metric(
-    "时间退出",
-    "开启" if st.session_state.get("use_time_stop", True) else "关闭",
-)
-
-st.markdown("**回测前数据源摘要**")
-dataframe_stretch(pre_backtest_source_summary, hide_index=True)
-
-if str(timeframe) in {"30m", "15m", "5m"} and not normalize_stock_codes(
-    stock_scope_text
-):
-    st.warning("当前选择分钟级数据且未指定股票池，读取本地数据时 IO 开销可能较高。")
-
 sqlite_probe_payload = st.session_state.get("sqlite_probe_payload")
 file_probe_payload = st.session_state.get("file_probe_payload")
-if data_source_label == "SQLite 数据库" and isinstance(sqlite_probe_payload, dict):
-    section_header(
-        "SQLite 数据表探测", "展示候选表、字段识别结果和前 20 行预览，便于直接选表。"
+
+with st.sidebar.expander("回测概览", expanded=True):
+    st.caption("先确认研究范围与数据来源，再进入规则配置。")
+    summary_cols = st.columns(2)
+    summary_cols[0].metric(
+        "交易方向",
+        "做多"
+        if direction_label_to_internal(current_entry_factor, current_direction_label)
+        == "up"
+        else "做空",
     )
-    if not sqlite_probe_payload.get("overview_df", pd.DataFrame()).empty:
-        dataframe_stretch(
-            sqlite_probe_payload["overview_df"], hide_index=True, height=240
-        )
-    if (
-        sqlite_probe_payload.get("preview_df") is not None
-        and not sqlite_probe_payload["preview_df"].empty
+    summary_cols[1].metric("股票池", summarize_stock_scope(stock_scope_text))
+    summary_cols_2 = st.columns(2)
+    summary_cols_2[0].metric("回测区间", f"{start_date} → {end_date}")
+    summary_cols_2[1].metric("数据源", source_summary_title, source_summary_desc)
+    summary_cols_3 = st.columns(2)
+    summary_cols_3[0].metric(
+        "分批退出",
+        "开启" if st.session_state.get("partial_exit_enabled", False) else "关闭",
+    )
+    summary_cols_3[1].metric(
+        "时间退出",
+        "开启" if st.session_state.get("use_time_stop", True) else "关闭",
+    )
+    st.markdown("**回测前数据源摘要**")
+    dataframe_stretch(pre_backtest_source_summary, hide_index=True)
+    if str(timeframe) in {"30m", "15m", "5m"} and not normalize_stock_codes(
+        stock_scope_text
     ):
-        st.markdown("**前 20 行数据预览**")
-        dataframe_stretch(
-            sqlite_probe_payload["preview_df"], hide_index=True, height=240
-        )
-elif data_source_label == "Excel/CSV 文件" and isinstance(file_probe_payload, dict):
-    section_header("文件结构预览", "展示文件结构、字段识别结果和前 20 行预览。")
-    description = file_probe_payload.get("description", {})
-    if description:
-        description_df = pd.DataFrame(
-            [
-                {
-                    "文件名": description.get("file_name", ""),
-                    "sheet": description.get("selected_sheet") or "-",
-                    "列数": description.get("column_count", 0),
-                    "列预览": description.get("columns_preview", ""),
-                    "字段识别结果": description.get("detected_fields", ""),
-                    "自动识别成功": "是" if description.get("auto_detected") else "否",
-                }
-            ]
-        )
-        dataframe_stretch(description_df, hide_index=True)
-        if not bool(description.get("auto_detected")):
-            st.warning("文件字段未能自动识别，请检查表头或在下方填写字段映射。")
-    if (
-        file_probe_payload.get("preview_df") is not None
-        and not file_probe_payload["preview_df"].empty
-    ):
-        st.markdown("**前 20 行数据预览**")
-        dataframe_stretch(file_probe_payload["preview_df"], hide_index=True, height=240)
+        st.warning("当前选择分钟级数据且未指定股票池，读取本地数据时 IO 开销可能较高。")
+    if data_source_label == "SQLite 数据库" and isinstance(sqlite_probe_payload, dict):
+        st.markdown("**SQLite 数据表探测**")
+        if not sqlite_probe_payload.get("overview_df", pd.DataFrame()).empty:
+            dataframe_stretch(
+                sqlite_probe_payload["overview_df"], hide_index=True, height=240
+            )
+        if (
+            sqlite_probe_payload.get("preview_df") is not None
+            and not sqlite_probe_payload["preview_df"].empty
+        ):
+            st.markdown("**前 20 行数据预览**")
+            dataframe_stretch(
+                sqlite_probe_payload["preview_df"], hide_index=True, height=240
+            )
+    elif data_source_label == "Excel/CSV 文件" and isinstance(file_probe_payload, dict):
+        st.markdown("**文件结构预览**")
+        description = file_probe_payload.get("description", {})
+        if description:
+            description_df = pd.DataFrame(
+                [
+                    {
+                        "文件名": description.get("file_name", ""),
+                        "sheet": description.get("selected_sheet") or "-",
+                        "列数": description.get("column_count", 0),
+                        "列预览": description.get("columns_preview", ""),
+                        "字段识别结果": description.get("detected_fields", ""),
+                        "自动识别成功": "是" if description.get("auto_detected") else "否",
+                    }
+                ]
+            )
+            dataframe_stretch(description_df, hide_index=True)
+            if not bool(description.get("auto_detected")):
+                st.warning("文件字段未能自动识别，请检查表头或在下方填写字段映射。")
+        if (
+            file_probe_payload.get("preview_df") is not None
+            and not file_probe_payload["preview_df"].empty
+        ):
+            st.markdown("**前 20 行数据预览**")
+            dataframe_stretch(file_probe_payload["preview_df"], hide_index=True, height=240)
+
+submitted = st.sidebar.button("开始回测", type="primary", key="run_backtest")
+st.sidebar.caption("结果会在当前页面下方的标签页中展示。")
 
 st.divider()
 section_header("策略配置", "核心参数默认展开，高级参数保持次要，避免一屏堆满控件。")
@@ -3211,11 +3450,11 @@ per_stock_stats_df = st.session_state.get("per_stock_stats_df", pd.DataFrame())
 batch_backtest_mode = str(st.session_state.get("batch_backtest_mode", "combined"))
 
 if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
-    tab_names = ["📊 绩效总览", "📈 资金曲线", "📝 交易明细"]
+    tab_names = ["📊 绩效总览", "📈 资金曲线", "🩺 交易诊断", "📝 交易明细"]
     if isinstance(scan_df, pd.DataFrame) and not scan_df.empty:
         tab_names.append("🔎 参数扫描")
     tabs = st.tabs(tab_names)
-    tab_summary, tab_curve, tab_details = tabs[:3]
+    tab_summary, tab_curve, tab_diagnostics, tab_details = tabs[:4]
     with tab_summary:
         section_header("绩效总览", "先看关键结果，再决定是否继续展开明细或参数扫描。")
         if (
@@ -3260,6 +3499,78 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
                 column_config=build_summary_column_config(),
                 height=260,
             )
+        st.download_button(
+            "导出 Excel",
+            data=st.session_state["excel_bytes"],
+            file_name=st.session_state["download_name"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    with tab_curve:
+        if isinstance(equity_df, pd.DataFrame) and not equity_df.empty:
+            section_header("净值与回撤", "默认展示净值曲线，并保留表格视图便于核对。")
+            chart_df = equity_df.copy()
+            chart_df["date"] = pd.to_datetime(chart_df["date"])
+            symbol_name_map = load_symbol_name_map()
+            batch_stock_code_series = chart_df.get("batch_stock_code")
+            has_batch_stock_code = bool(
+                isinstance(batch_stock_code_series, pd.Series)
+                and batch_stock_code_series.notna().to_numpy().any()
+            )
+            use_grouped_equity_chart = bool(
+                batch_backtest_mode == "per_stock"
+                and "batch_stock_code" in chart_df.columns
+                and has_batch_stock_code
+            )
+            if use_grouped_equity_chart:
+                chart_df["batch_stock_display"] = chart_df["batch_stock_code"].map(
+                    lambda value: build_display_symbol_label(value, symbol_name_map)
+                )
+                chart_df = chart_df.sort_values(["batch_stock_display", "date"])
+                fig = px.line(
+                    chart_df,
+                    x="date",
+                    y="net_value",
+                    color="batch_stock_display",
+                    line_group="batch_stock_display",
+                    labels={
+                        "date": "日期",
+                        "net_value": "净值",
+                        "batch_stock_display": "标的",
+                    },
+                )
+                fig.update_traces(mode="lines", line=dict(width=1.8))
+                fig.update_layout(
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="left",
+                        x=0,
+                        title_text="标的",
+                    )
+                )
+            else:
+                fig = px.line(chart_df, x="date", y="net_value")
+            fig.update_layout(margin=dict(l=0, r=0, t=16, b=0), hovermode="x unified")
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                "逐股独立回测时，图例会按标的区分各条净值曲线；下表保留原始净值序列，适合与图形交叉核对。"
+                if use_grouped_equity_chart
+                else "下表保留原始净值序列，适合与图形交叉核对。"
+            )
+            dataframe_stretch(
+                format_equity_for_display(equity_df),
+                hide_index=True,
+                column_config=build_equity_column_config(),
+                height=260,
+            )
+        else:
+            st.info("暂无资金曲线数据")
+
+    with tab_diagnostics:
+        section_header("交易诊断", "将交易行为、回撤诊断与异常队列集中展示，便于排查与复盘。")
+        symbol_name_map = load_symbol_name_map()
         if isinstance(trade_behavior_df, pd.DataFrame) and not trade_behavior_df.empty:
             st.markdown("**交易行为总览**")
             behavior_metrics = trade_behavior_df.iloc[0]
@@ -3294,71 +3605,80 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
                 column_config=build_trade_behavior_column_config(),
                 height=120,
             )
-        st.download_button(
-            "导出 Excel",
-            data=st.session_state["excel_bytes"],
-            file_name=st.session_state["download_name"],
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-    with tab_curve:
-        if isinstance(equity_df, pd.DataFrame) and not equity_df.empty:
-            section_header("净值与回撤", "默认展示净值曲线，并保留表格视图便于核对。")
-            chart_df = equity_df.copy()
-            chart_df["date"] = pd.to_datetime(chart_df["date"])
-            fig = px.line(chart_df, x="date", y="net_value")
-            fig.update_layout(margin=dict(l=0, r=0, t=16, b=0))
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption("下表保留原始净值序列，适合与图形交叉核对。")
-            dataframe_stretch(
-                format_equity_for_display(equity_df),
-                hide_index=True,
-                column_config=build_equity_column_config(),
-                height=260,
+        if (
+            isinstance(drawdown_episodes_df, pd.DataFrame)
+            and not drawdown_episodes_df.empty
+        ):
+            st.markdown("**回撤诊断**")
+            dd_metric_cols = st.columns(4)
+            dd_metric_cols[0].metric("回撤段数", f"{len(drawdown_episodes_df)}")
+            dd_metric_cols[1].metric(
+                "最深回撤",
+                f"{float(drawdown_episodes_df['peak_to_trough_pct'].max()):.2f}%",
             )
+            dd_metric_cols[2].metric(
+                "最长水下周期",
+                f"{int(drawdown_episodes_df['underwater_bars'].max())}",
+            )
+            dd_metric_cols[3].metric(
+                "最大回撤主导原因",
+                str(drawdown_episodes_df.iloc[0]["dominant_entry_reason"] or "-"),
+            )
+            dd_cols = st.columns(2)
+            with dd_cols[0]:
+                dataframe_stretch(
+                    format_drawdown_episodes_for_display(drawdown_episodes_df),
+                    hide_index=True,
+                    column_config=build_drawdown_episode_column_config(),
+                    height=240,
+                )
             if (
-                isinstance(drawdown_episodes_df, pd.DataFrame)
-                and not drawdown_episodes_df.empty
+                isinstance(drawdown_contributors_df, pd.DataFrame)
+                and not drawdown_contributors_df.empty
             ):
-                st.markdown("**回撤诊断**")
-                dd_metric_cols = st.columns(4)
-                dd_metric_cols[0].metric("回撤段数", f"{len(drawdown_episodes_df)}")
-                dd_metric_cols[1].metric(
-                    "最深回撤",
-                    f"{float(drawdown_episodes_df['peak_to_trough_pct'].max()):.2f}%",
-                )
-                dd_metric_cols[2].metric(
-                    "最长水下周期",
-                    f"{int(drawdown_episodes_df['underwater_bars'].max())}",
-                )
-                dd_metric_cols[3].metric(
-                    "最大回撤主导原因",
-                    str(drawdown_episodes_df.iloc[0]["dominant_entry_reason"] or "-"),
-                )
-                dd_cols = st.columns(2)
-                with dd_cols[0]:
+                with dd_cols[1]:
+                    st.caption("最大回撤段内的开仓原因贡献分布")
                     dataframe_stretch(
-                        format_drawdown_episodes_for_display(drawdown_episodes_df),
+                        format_drawdown_contributors_for_display(drawdown_contributors_df),
                         hide_index=True,
-                        column_config=build_drawdown_episode_column_config(),
+                        column_config=build_drawdown_contributor_column_config(),
                         height=240,
                     )
-                if (
-                    isinstance(drawdown_contributors_df, pd.DataFrame)
-                    and not drawdown_contributors_df.empty
-                ):
-                    with dd_cols[1]:
-                        st.caption("最大回撤段内的开仓原因贡献分布")
-                        dataframe_stretch(
-                            format_drawdown_contributors_for_display(
-                                drawdown_contributors_df
-                            ),
-                            hide_index=True,
-                            column_config=build_drawdown_contributor_column_config(),
-                            height=240,
-                        )
-        else:
-            st.info("暂无资金曲线数据")
+        if isinstance(anomaly_queue_df, pd.DataFrame) and not anomaly_queue_df.empty:
+            st.markdown("**异常交易队列**")
+            anomaly_counts = anomaly_queue_df["anomaly_type"].value_counts()
+            anomaly_metric_cols = st.columns(4)
+            anomaly_metric_cols[0].metric("异常交易数", f"{len(anomaly_queue_df)}")
+            anomaly_metric_cols[1].metric(
+                "固定止盈复审",
+                f"{int(anomaly_counts.get('fixed_tp_review', 0) or 0)}",
+            )
+            anomaly_metric_cols[2].metric(
+                "利润回撤复审",
+                f"{int(anomaly_counts.get('profit_drawdown_review', 0) or 0)}",
+            )
+            anomaly_metric_cols[3].metric(
+                "ATR 回撤复审",
+                f"{int(anomaly_counts.get('atr_trailing_review', 0) or 0)}",
+            )
+            st.caption(
+                "异常严重度按持有周期锚定：优先看日均最大浮盈/日均最大不利波动及是否越过对应激发阈值。"
+            )
+            dataframe_stretch(
+                format_anomaly_queue_for_display(
+                    anomaly_queue_df,
+                    symbol_name_map=symbol_name_map,
+                ),
+                hide_index=True,
+                column_config=build_anomaly_queue_column_config(),
+                height=280,
+            )
+        if (
+            (not isinstance(trade_behavior_df, pd.DataFrame) or trade_behavior_df.empty)
+            and (not isinstance(drawdown_episodes_df, pd.DataFrame) or drawdown_episodes_df.empty)
+            and (not isinstance(anomaly_queue_df, pd.DataFrame) or anomaly_queue_df.empty)
+        ):
+            st.info("暂无诊断数据")
 
     with tab_details:
         if isinstance(detail_df, pd.DataFrame) and not detail_df.empty:
@@ -3371,35 +3691,6 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
             detail_meta_cols[2].metric(
                 "净收益中位数", f"{float(stats.get('median_net_return_pct', 0.0)):.2f}%"
             )
-            if (
-                isinstance(anomaly_queue_df, pd.DataFrame)
-                and not anomaly_queue_df.empty
-            ):
-                st.markdown("**异常交易队列**")
-                anomaly_counts = anomaly_queue_df["anomaly_type"].value_counts()
-                anomaly_metric_cols = st.columns(4)
-                anomaly_metric_cols[0].metric("异常交易数", f"{len(anomaly_queue_df)}")
-                anomaly_metric_cols[1].metric(
-                    "固定止盈复审",
-                    f"{int(anomaly_counts.get('fixed_tp_review', 0) or 0)}",
-                )
-                anomaly_metric_cols[2].metric(
-                    "利润回撤复审",
-                    f"{int(anomaly_counts.get('profit_drawdown_review', 0) or 0)}",
-                )
-                anomaly_metric_cols[3].metric(
-                    "ATR 回撤复审",
-                    f"{int(anomaly_counts.get('atr_trailing_review', 0) or 0)}",
-                )
-                st.caption(
-                    "异常严重度按持有周期锚定：优先看日均最大浮盈/日均最大不利波动及是否越过对应激发阈值。"
-                )
-                dataframe_stretch(
-                    format_anomaly_queue_for_display(anomaly_queue_df),
-                    hide_index=True,
-                    column_config=build_anomaly_queue_column_config(),
-                    height=280,
-                )
             dataframe_stretch(
                 format_detail_for_display(detail_df),
                 hide_index=True,
@@ -3416,8 +3707,8 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
         else:
             st.info("暂无交易明细")
 
-    if len(tabs) == 4:
-        with tabs[3]:
+    if len(tabs) == 5:
+        with tabs[4]:
             section_header(
                 "参数扫描结果", "先看排名表，再看热力图/折线图判断参数敏感性。"
             )
@@ -3492,6 +3783,6 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
 else:
     st.divider()
     section_header(
-        "结果区域", "运行回测后，这里会保留总览、曲线、明细和参数扫描标签页。"
+        "结果区域", "运行回测后，这里会保留总览、曲线、诊断、明细和参数扫描标签页。"
     )
     st.info("请先在左侧确认回测范围与数据源，再点击“开始回测”。")

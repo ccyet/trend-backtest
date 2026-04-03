@@ -136,6 +136,42 @@ class AppDisplayFormatterTest(unittest.TestCase):
         self.assertEqual(log_record["更新时间"], "2024-02-01 09:30")
         self.assertEqual(log_record["更新行数"], "123,456")
 
+    def test_symbol_display_label_prefers_name_and_falls_back_to_code(self) -> None:
+        self.assertEqual(
+            self.app.build_display_symbol_label(
+                "000300.SH",
+                {"000300.SH": "沪深300"},
+            ),
+            "沪深300（000300.SH）",
+        )
+        self.assertEqual(
+            self.app.build_display_symbol_label(
+                "399001.SZ",
+                {"000300.SH": "沪深300"},
+            ),
+            "399001.SZ",
+        )
+
+    def test_format_anomaly_queue_prefers_symbol_name_when_mapping_provided(self) -> None:
+        anomaly_df = pd.DataFrame(
+            {
+                "date": ["2024-01-03 10:30:00", "2024-01-04 10:30:00"],
+                "stock_code": ["000300.SH", "399001.SZ"],
+                "anomaly_type": ["missed_fixed_tp", "missed_fixed_tp"],
+                "severity_score": [8.2, 7.1],
+                "trade_no": [7, 8],
+                "holding_days": [4, 3],
+            }
+        )
+
+        records = self.app.format_anomaly_queue_for_display(
+            anomaly_df,
+            symbol_name_map={"000300.SH": "沪深300"},
+        ).to_dict("records")
+
+        self.assertEqual(records[0]["股票代码"], "沪深300（000300.SH）")
+        self.assertEqual(records[1]["股票代码"], "399001.SZ")
+
     def test_dataframe_stretch_falls_back_for_legacy_streamlit_width_error(self) -> None:
         dataframe_mock = Mock(
             side_effect=[

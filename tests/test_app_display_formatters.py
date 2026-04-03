@@ -253,3 +253,39 @@ def test_review_display_formatters_compact_behavior_drawdown_and_anomaly_values(
     assert anomaly_record["激发阈值"] == "5%"
     assert anomaly_record["日均最大浮盈"] == "2.43%"
     assert anomaly_record["信号日期"] == "2024-01-03 10:30"
+
+
+def test_symbol_display_label_prefers_name_and_falls_back_to_code() -> None:
+    app = _load_app_module()
+
+    assert (
+        app.build_display_symbol_label(
+            "000300.SH",
+            {"000300.SH": "沪深300"},
+        )
+        == "沪深300（000300.SH）"
+    )
+    assert app.build_display_symbol_label("399001.SZ", {"000300.SH": "沪深300"}) == "399001.SZ"
+
+
+def test_format_anomaly_queue_for_display_prefers_symbol_name_when_mapping_provided() -> None:
+    app = _load_app_module()
+
+    anomaly_df = pd.DataFrame(
+        {
+            "date": ["2024-01-03 10:30:00", "2024-01-04 10:30:00"],
+            "stock_code": ["000300.SH", "399001.SZ"],
+            "anomaly_type": ["missed_fixed_tp", "missed_fixed_tp"],
+            "severity_score": [8.2, 7.1],
+            "trade_no": [7, 8],
+            "holding_days": [4, 3],
+        }
+    )
+
+    records = app.format_anomaly_queue_for_display(
+        anomaly_df,
+        symbol_name_map={"000300.SH": "沪深300"},
+    ).to_dict("records")
+
+    assert records[0]["股票代码"] == "沪深300（000300.SH）"
+    assert records[1]["股票代码"] == "399001.SZ"

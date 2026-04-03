@@ -14,7 +14,7 @@ from data.services.local_inventory_service import list_local_symbols_by_timefram
 REQUIRED_COLUMNS = ("date", "stock_code", "open", "high", "low", "close")
 OPTIONAL_COLUMNS = ("volume",)
 SUPPORTED_FILE_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
-TIMEFRAME_DIR_NAMES = {"1d": "daily", "30m": "30m", "15m": "15m", "5m": "5m"}
+TIMEFRAME_DIR_NAMES = {"1d": "daily", "30m": "30m", "15m": "15m", "5m": "5m", "1m": "1m"}
 
 COLUMN_ALIASES = {
     "date": ("date", "trade_date", "trading_date", "trade_dt", "日期", "交易日期", "交易日"),
