@@ -333,6 +333,14 @@ class AnalysisParams:
     atr_filter_period: int = 14
     min_atr_filter_pct: float = 0.0
     max_atr_filter_pct: float = 100.0
+    enable_board_ma_filter: bool = False
+    board_ma_filter_line: str = "20"
+    board_ma_filter_operator: str = ">="
+    board_ma_filter_threshold: float = 0.0
+    enable_board_ma_exit: bool = False
+    board_ma_exit_line: str = "20"
+    board_ma_exit_operator: str = "<="
+    board_ma_exit_threshold: float = 0.0
     candle_run_length: int = 2
     candle_run_min_body_pct: float = 1.0
     candle_run_total_move_pct: float = 2.0
@@ -760,6 +768,30 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
         and params.min_atr_filter_pct > params.max_atr_filter_pct
     ):
         errors.append("ATR 波动过滤下限不能大于上限。")
+
+    if params.enable_board_ma_filter and params.board_ma_filter_line not in {"20", "50"}:
+        errors.append("板块均线开仓过滤仅支持 20 或 50 日占比。")
+
+    if params.enable_board_ma_filter and params.board_ma_filter_operator not in {">=", "<="}:
+        errors.append("板块均线开仓过滤比较方向仅支持 >= 或 <=。")
+
+    if params.enable_board_ma_filter and params.board_ma_filter_threshold < 0:
+        errors.append("板块均线开仓过滤阈值不能为负数。")
+
+    if params.enable_board_ma_filter and params.board_ma_filter_threshold > 100:
+        errors.append("板块均线开仓过滤阈值不能大于 100。")
+
+    if params.enable_board_ma_exit and params.board_ma_exit_line not in {"20", "50"}:
+        errors.append("板块均线离场仅支持 20 或 50 日占比。")
+
+    if params.enable_board_ma_exit and params.board_ma_exit_operator not in {">=", "<="}:
+        errors.append("板块均线离场比较方向仅支持 >= 或 <=。")
+
+    if params.enable_board_ma_exit and params.board_ma_exit_threshold < 0:
+        errors.append("板块均线离场阈值不能为负数。")
+
+    if params.enable_board_ma_exit and params.board_ma_exit_threshold > 100:
+        errors.append("板块均线离场阈值不能大于 100。")
 
     if params.use_ma_filter:
         if params.fast_ma_period < 1 or params.slow_ma_period < 1:

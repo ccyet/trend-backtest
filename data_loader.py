@@ -12,9 +12,10 @@ from data.services.local_inventory_service import list_local_symbols_by_timefram
 
 
 REQUIRED_COLUMNS = ("date", "stock_code", "open", "high", "low", "close")
-OPTIONAL_COLUMNS = ("volume",)
+OPTIONAL_COLUMNS = ("volume", "board_ma_ratio_20", "board_ma_ratio_50")
 SUPPORTED_FILE_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
 TIMEFRAME_DIR_NAMES = {"1d": "daily", "30m": "30m", "15m": "15m", "5m": "5m", "1m": "1m"}
+INDICATOR_DIR_NAMES = {"board_ma": "board_ma"}
 
 COLUMN_ALIASES = {
     "date": ("date", "trade_date", "trading_date", "trade_dt", "日期", "交易日期", "交易日"),
@@ -35,6 +36,8 @@ COLUMN_ALIASES = {
     "low": ("low", "low_price", "lo", "最低", "最低价"),
     "close": ("close", "close_price", "settle", "settlement", "cls", "收盘", "收盘价"),
     "volume": ("volume", "vol", "volx", "turnover_volume", "成交量", "成交股数"),
+    "board_ma_ratio_20": ("board_ma_ratio_20", "均20占比", "board_ma_20"),
+    "board_ma_ratio_50": ("board_ma_ratio_50", "均50占比", "board_ma_50"),
 }
 
 
@@ -142,6 +145,45 @@ def resolve_local_data_root(local_data_root: str, timeframe: str = "1d") -> Path
     return root
 
 
+def _load_local_indicator_frame(
+    indicator_key: str,
+    stock_codes: tuple[str, ...] | None,
+    start_date: str,
+    end_date: str,
+    indicator_root: str = "data/indicators",
+) -> pd.DataFrame:
+    indicator_dir_name = INDICATOR_DIR_NAMES.get(indicator_key, indicator_key)
+    indicator_dir = Path(indicator_root) / indicator_dir_name
+    if not indicator_dir.exists():
+        return pd.DataFrame(columns=pd.Index(["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]))
+
+    normalized_codes = tuple(code.strip().upper() for code in (stock_codes or ()) if code.strip())
+    symbols = list(normalized_codes) if normalized_codes else sorted(path.stem.upper() for path in indicator_dir.glob("*.parquet"))
+    if not symbols:
+        return pd.DataFrame(columns=pd.Index(["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]))
+
+    frames: list[pd.DataFrame] = []
+    start_ts = cast(pd.Timestamp, pd.to_datetime(start_date)).normalize()
+    end_ts = cast(pd.Timestamp, pd.to_datetime(end_date)).normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    for symbol in symbols:
+        file_path = indicator_dir / f"{symbol}.parquet"
+        if not file_path.exists():
+            continue
+        frame = pd.read_parquet(file_path).copy()
+        if "symbol" in frame.columns and "stock_code" not in frame.columns:
+            frame = frame.rename(columns={"symbol": "stock_code"})
+        if "date" not in frame.columns or "stock_code" not in frame.columns:
+            continue
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        frame["stock_code"] = frame["stock_code"].astype(str).str.upper()
+        frame = frame.loc[frame["date"].between(start_ts, end_ts)].copy()
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame(columns=pd.Index(["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]))
+    return cast(pd.DataFrame, pd.concat(frames, ignore_index=True))
+
+
 def _normalize_loaded_data(
     df: pd.DataFrame,
     column_map: dict[str, str],
@@ -165,7 +207,7 @@ def _normalize_loaded_data(
         cast(pd.Series, normalized["date"]),
         normalize_to_day=normalize_to_day,
     )
-    for column in ("open", "high", "low", "close", "volume"):
+    for column in ("open", "high", "low", "close", "volume", "board_ma_ratio_20", "board_ma_ratio_50"):
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
 
     normalized["stock_code"] = cast(pd.Series, normalized["stock_code"]).astype(str).str.strip().str.upper()
@@ -537,6 +579,8 @@ def load_local_parquet_data(
     local_data_root: str = "data/market/daily",
     adjust: str = "qfq",
     timeframe: str = "1d",
+    indicator_keys: tuple[str, ...] = (),
+    indicator_root: str = "data/indicators",
 ) -> pd.DataFrame:
     root = resolve_local_data_root(local_data_root, timeframe)
     adjust_dir = root / adjust
@@ -586,6 +630,27 @@ def load_local_parquet_data(
     )
     if normalized.empty:
         raise ValueError("本地 parquet 过滤后无可用数据，请检查回测区间或股票池。")
+
+    for indicator_key in indicator_keys:
+        indicator_df = _load_local_indicator_frame(
+            indicator_key=indicator_key,
+            stock_codes=stock_codes,
+            start_date=start_date,
+            end_date=end_date,
+            indicator_root=indicator_root,
+        )
+        if indicator_df.empty:
+            continue
+        overlap_columns = [
+            column
+            for column in indicator_df.columns
+            if column not in {"stock_code", "date"} and column in normalized.columns
+        ]
+        if overlap_columns:
+            normalized = normalized.drop(columns=overlap_columns)
+        indicator_df = indicator_df.drop_duplicates(subset=["stock_code", "date"], keep="last")
+        normalized = normalized.merge(indicator_df, on=["stock_code", "date"], how="left")
+
     return normalized
 
 def load_market_data(
@@ -605,6 +670,8 @@ def load_market_data(
     local_data_root: str = "data/market/daily",
     adjust: str = "qfq",
     timeframe: str = "1d",
+    indicator_keys: tuple[str, ...] = (),
+    indicator_root: str = "data/indicators",
 ) -> pd.DataFrame:
     if source_type == "local_parquet":
         return load_local_parquet_data(
@@ -616,6 +683,8 @@ def load_market_data(
             local_data_root=local_data_root,
             adjust=adjust,
             timeframe=timeframe,
+            indicator_keys=indicator_keys,
+            indicator_root=indicator_root,
         )
 
     if source_type == "sqlite":

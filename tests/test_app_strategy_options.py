@@ -95,6 +95,24 @@ def test_app_exposes_atr_filter_and_trailing_controls() -> None:
         assert option in scan_axis_2.options
 
 
+def test_app_exposes_board_ma_filter_and_exit_controls() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    checkbox_labels = [widget.label for widget in app.checkbox]
+    number_input_labels = [widget.label for widget in app.number_input]
+    selectbox_labels = [widget.label for widget in app.selectbox]
+
+    assert "启用板块均线占比过滤" in checkbox_labels
+    assert "启用板块均线离场（整笔）" in checkbox_labels
+    assert "板块均线过滤阈值（%）" in number_input_labels
+    assert "板块均线离场阈值（%）" in number_input_labels
+    assert "占比线" in selectbox_labels
+    assert "离场占比线" in selectbox_labels
+    assert "比较方向" in selectbox_labels
+    assert "离场比较方向" in selectbox_labels
+
+
 def test_app_preserves_candle_run_length_above_two() -> None:
     app = AppTest.from_file("app.py", default_timeout=10)
     app.run()
@@ -300,6 +318,102 @@ def test_app_passes_tdx_tqcenter_path_to_update_subprocess(
     assert timeframe_values == ["1d", "30m"]
 
 
+def test_app_passes_tdx_tqcenter_path_to_indicator_import_subprocess(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeResult:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(cmd, capture_output, text, env=None):
+        captured["cmd"] = cmd
+        captured["capture_output"] = capture_output
+        captured["text"] = text
+        captured["env"] = env
+        return _FakeResult()
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    install_root = str(tmp_path / "TdxInstall")
+    app.session_state["tdx_tqcenter_path"] = install_root
+    app.session_state["tdx_tqcenter_path_display"] = install_root
+    app.text_area(key="offline_update_symbols").set_value("000001.SZ")
+
+    app.button(key="offline_indicator_submit").click()
+    app.run()
+
+    assert captured["capture_output"] is True
+    assert captured["text"] is True
+    assert isinstance(captured["env"], dict)
+    assert cast(dict[str, str], captured["env"])["TDX_TQCENTER_PATH"] == str(
+        (tmp_path / "TdxInstall" / "PYPlugins" / "user")
+    )
+
+    cmd = cast(list[str], captured["cmd"])
+    assert cmd[1].endswith("scripts/import_tdx_local_indicators.py")
+    assert "--indicator" in cmd and "board_ma" in cmd
+
+
+def test_app_indicator_probe_shows_manual_fallback_message(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "app.probe_local_indicator_candidates",
+        lambda path: ([('board_ma', '板块均线')], '当前未发现通达信提供稳定的本地公式枚举接口，已展示系统内置支持项；若未命中，请手动输入公式名称和输出标识符。'),
+    )
+
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+    app.session_state["tdx_tqcenter_path"] = str(tmp_path / "TdxInstall")
+    app.button(key="offline_indicator_probe").click()
+    app.run()
+
+    infos = [info.value for info in app.info]
+    assert any("未发现通达信提供稳定的本地公式枚举接口" in item for item in infos)
+
+
+def test_app_passes_manual_formula_mapping_to_indicator_import(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeResult:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(cmd, capture_output, text, env=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        return _FakeResult()
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+    app.session_state["tdx_tqcenter_path"] = str(tmp_path / "TdxInstall")
+    app.session_state["tdx_tqcenter_path_display"] = str(tmp_path / "TdxInstall")
+    app.text_area(key="offline_update_symbols").set_value("000001.SZ")
+    app.radio(key="offline_indicator_mode").set_value("手动指定")
+    app.run()
+    app.text_input(key="offline_indicator_manual_key").set_value("board_ma")
+    app.text_input(key="offline_indicator_formula_name").set_value("板块均线")
+    app.text_area(key="offline_indicator_output_map_text").set_value(
+        "board_ma_ratio_20=NOTEXT1\nboard_ma_ratio_50=NOTEXT2"
+    )
+    app.button(key="offline_indicator_submit").click()
+    app.run()
+
+    cmd = cast(list[str], captured["cmd"])
+    assert "--formula-name" in cmd and "板块均线" in cmd
+    assert "--output-map" in cmd
+    output_map_arg = cmd[cmd.index("--output-map") + 1]
+    assert "board_ma_ratio_20=NOTEXT1" in output_map_arg
+    assert "board_ma_ratio_50=NOTEXT2" in output_map_arg
+
+
 def test_app_can_run_candle_run_acceleration_backtest_with_local_parquet(
     tmp_path: Path,
 ) -> None:
@@ -339,6 +453,7 @@ def test_app_can_run_candle_run_acceleration_backtest_with_local_parquet(
     app.button(key="run_backtest").click()
     app.run(timeout=10)
 
+    assert not app.error, app.error[0].value if app.error else "unknown error"
     assert app.success[0].value == "回测完成"
     assert any(
         metric.label == "交易笔数" and str(metric.value) == "1" for metric in app.metric

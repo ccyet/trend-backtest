@@ -26,6 +26,7 @@ BREAKOUT_ENTRY_FACTORS = frozenset(
 )
 SEQUENCE_ENTRY_FACTORS = frozenset({"candle_run", "candle_run_acceleration"})
 ESHB_ENTRY_FACTOR = "early_surge_high_base"
+BOARD_MA_COLUMNS = {"20": "board_ma_ratio_20", "50": "board_ma_ratio_50"}
 
 
 def _column(stock_df: pd.DataFrame, column_name: str) -> pd.Series:
@@ -80,6 +81,23 @@ def _compute_atr_series(stock_df: pd.DataFrame, period: int) -> pd.Series:
     )
 
 
+def _board_ma_column_name(line: str) -> str:
+    return BOARD_MA_COLUMNS.get(str(line), BOARD_MA_COLUMNS["20"])
+
+
+def _board_ma_series(stock_df: pd.DataFrame, line: str) -> pd.Series:
+    column_name = _board_ma_column_name(line)
+    if column_name not in stock_df.columns:
+        return pd.Series(math.nan, index=stock_df.index, dtype=float)
+    return cast(pd.Series, pd.to_numeric(stock_df[column_name], errors="coerce"))
+
+
+def _compare_board_ma(value: float, operator: str, threshold: float) -> bool:
+    if operator == "<=":
+        return value <= threshold
+    return value >= threshold
+
+
 def _build_entry_reason(params: AnalysisParams, entry_factor: str) -> str:
     direction_text = "up" if params.gap_direction == "up" else "down"
     if entry_factor == "gap":
@@ -106,6 +124,7 @@ def _exit_reason_label(exit_type: str) -> str:
         "take_profit": "take_profit: 固定止盈触发",
         "profit_drawdown": "profit_drawdown: 分批利润回撤触发",
         "profit_drawdown_exit": "profit_drawdown_exit: 整笔利润回撤触发",
+        "board_ma_exit": "board_ma_exit: 板块均线离场触发",
         "ma_exit": "ma_exit: 均线离场触发",
         "atr_trailing": "atr_trailing: ATR 跟踪止盈触发",
         "time_exit": "time_exit: 时间退出触发",
@@ -376,6 +395,10 @@ def _resolve_entry_execution(
 def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
     stock_df = df.sort_values("date").reset_index(drop=True).copy()
 
+    for column_name in BOARD_MA_COLUMNS.values():
+        if column_name not in stock_df.columns:
+            stock_df[column_name] = math.nan
+
     stock_df["prev_close"] = _column(stock_df, "close").shift(1)
     stock_df["prev_high"] = _column(stock_df, "high").shift(1)
     stock_df["prev_low"] = _column(stock_df, "low").shift(1)
@@ -501,6 +524,18 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
         signal_mask &= stock_df["atr_filter_pct"].notna()
         signal_mask &= stock_df["atr_filter_pct"] >= params.min_atr_filter_pct
         signal_mask &= stock_df["atr_filter_pct"] <= params.max_atr_filter_pct
+
+    if params.enable_board_ma_filter:
+        board_ma_signal = _board_ma_series(stock_df, params.board_ma_filter_line)
+        stock_df["board_ma_signal_value"] = board_ma_signal
+        signal_mask &= board_ma_signal.notna()
+        signal_mask &= board_ma_signal.apply(
+            lambda value: _compare_board_ma(float(value), params.board_ma_filter_operator, params.board_ma_filter_threshold)
+            if pd.notna(value)
+            else False
+        )
+    else:
+        stock_df["board_ma_signal_value"] = math.nan
 
     stock_df["is_signal"] = signal_mask
     return stock_df
@@ -781,6 +816,7 @@ def simulate_trade(
 
     triggered_profit_drawdown_ratio = math.nan
     triggered_exit_ma_value = math.nan
+    triggered_board_ma_value = math.nan
     trailing_reference_price = (
         float(signal_row["low"]) if direction == "short" else float(signal_row["high"])
     )
@@ -964,7 +1000,31 @@ def simulate_trade(
             direction,
         )
 
-        # 3) 旧版整笔退出
+        # 3) 整笔 OR 离场（对剩余仓位统一生效）
+        if remaining_weight > EPSILON and params.enable_board_ma_exit:
+            board_ma_value = _float_scalar(
+                _board_ma_series(stock_df, params.board_ma_exit_line).iloc[day_idx]
+            )
+            if not pd.isna(board_ma_value):
+                exit_hit = _compare_board_ma(
+                    float(board_ma_value),
+                    params.board_ma_exit_operator,
+                    params.board_ma_exit_threshold,
+                )
+                if exit_hit:
+                    fills.append(
+                        TradeFill(
+                            _trade_timestamp_str(day_date, params),
+                            _apply_exit_slippage(day_close, params, direction),
+                            remaining_weight,
+                            "board_ma_exit",
+                            holding_days,
+                        )
+                    )
+                    triggered_board_ma_value = board_ma_value
+                    remaining_weight = 0.0
+
+        # 4) 旧版整笔退出
         if (not params.partial_exit_enabled) and remaining_weight > EPSILON:
             if remaining_weight > EPSILON and params.enable_profit_drawdown_exit:
                 current_total_profit_ratio = _total_trade_profit_ratio(
@@ -1073,7 +1133,7 @@ def simulate_trade(
                 )
                 remaining_weight = 0.0
 
-        # 4) 时间退出
+        # 5) 时间退出
         if remaining_weight > EPSILON and holding_days >= params.time_stop_days:
             holding_return = (
                 (reference_buy_price - day_close) / reference_buy_price
@@ -1102,7 +1162,7 @@ def simulate_trade(
             else max(trailing_reference_price, favorable_price)
         )
 
-    # 5) 数据结束处理
+    # 6) 数据结束处理
     if remaining_weight > EPSILON:
         if params.time_exit_mode == "strict":
             return None, "unclosed_trade"
@@ -1196,6 +1256,9 @@ def simulate_trade(
         else math.nan,
         "profit_drawdown_ratio": float(triggered_profit_drawdown_ratio) * 100.0
         if pd.notna(triggered_profit_drawdown_ratio)
+        else math.nan,
+        "board_ma_value": float(triggered_board_ma_value)
+        if pd.notna(triggered_board_ma_value)
         else math.nan,
         "entry_factor": entry_factor,
         "entry_reason": _build_entry_reason(params, entry_factor),

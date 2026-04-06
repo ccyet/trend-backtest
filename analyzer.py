@@ -35,6 +35,7 @@ BASE_DETAIL_COLUMNS = [
     "max_profit_pct",
     "exit_ma_value",
     "profit_drawdown_ratio",
+    "board_ma_value",
     "fills",
     "fill_count",
     "fill_detail_json",

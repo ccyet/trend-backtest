@@ -104,6 +104,7 @@ class TdxQuantProvider:
         has_explicit_time = TdxQuantProvider._has_explicit_time(value)
         return parsed.strftime("%Y%m%d%H%M%S" if has_explicit_time else "%Y%m%d")
 
+
     @staticmethod
     def _import_tq() -> Any:
         if TdxQuantProvider._tq is not None:
@@ -257,6 +258,7 @@ class TdxQuantProvider:
             "fill_data": TdxQuantProvider.DEFAULT_FILL_DATA,
         }
         return tq.get_market_data(**request_kwargs)
+
 
     @staticmethod
     def fetch_bars(

@@ -46,6 +46,7 @@ from models import (
     parse_scan_values,
     validate_params,
 )
+from data.providers.tdx_local_indicator_provider import TdxLocalIndicatorProvider
 
 
 st.set_page_config(layout="wide", page_title="Gap_test 回测系统")
@@ -78,6 +79,7 @@ DETAIL_PRICE_COLUMNS = [
     "buy_price",
     "sell_price",
     "exit_ma_value",
+    "board_ma_value",
 ]
 DETAIL_PERCENT_COLUMNS = [
     "gap_pct_vs_prev_close",
@@ -215,6 +217,7 @@ DETAIL_COLUMN_LABELS = {
     "mae_pct": "最大不利波动",
     "max_profit_pct": "最大浮盈",
     "exit_ma_value": "离场均线值",
+    "board_ma_value": "板块均线值",
     "profit_drawdown_ratio": "利润回撤比例",
     "fill_count": "成交批次数",
     "fill_detail_json": "成交明细",
@@ -319,11 +322,19 @@ FACTOR_CONTROL_DEFAULTS: dict[str, str | int | float] = {
     "atr_filter_period": 14,
     "min_atr_filter_pct": 0.0,
     "max_atr_filter_pct": 100.0,
+    "board_ma_filter_line": "20",
+    "board_ma_filter_operator": ">=",
+    "board_ma_filter_threshold": 50.0,
+    "board_ma_exit_line": "20",
+    "board_ma_exit_operator": "<=",
+    "board_ma_exit_threshold": 40.0,
     "min_profit_to_activate_profit_drawdown_pct": 5.0,
     "atr_trailing_period": 14,
     "atr_trailing_multiplier": 3.0,
     "min_profit_to_activate_atr_trailing_pct": 5.0,
 }
+BOARD_MA_LINE_LABELS = {"20": "均20占比", "50": "均50占比"}
+BOARD_MA_OPERATOR_LABELS = {">=": "高于/等于阈值", "<=": "低于/等于阈值"}
 SCAN_AXIS_STATE_KEYS = (
     ("scan_axis_1_field", "scan_axis_1_values"),
     ("scan_axis_2_field", "scan_axis_2_values"),
@@ -793,6 +804,50 @@ def render_trading_guide_page() -> None:
 
 def form_submit_button_stretch(label: str) -> bool:
     return st.form_submit_button(label)
+
+
+@st.cache_data(show_spinner=False)
+def load_market_data_cached_v2(
+    *,
+    source_type: str,
+    start_date: str,
+    end_date: str,
+    stock_codes: tuple[str, ...] | None = None,
+    table_name: str | None = None,
+    column_override_items: tuple[tuple[str, str], ...] = (),
+    lookback_days: int = 0,
+    lookahead_days: int = 0,
+    db_path: str | None = None,
+    file_path: str | None = None,
+    file_bytes: bytes | None = None,
+    file_name: str | None = None,
+    sheet_name: str | None = None,
+    local_data_root: str = "data/market/daily",
+    adjust: str = "qfq",
+    timeframe: str = "1d",
+    indicator_keys: tuple[str, ...] = (),
+    indicator_root: str = "data/indicators",
+) -> pd.DataFrame:
+    return load_market_data(
+        source_type=source_type,
+        start_date=start_date,
+        end_date=end_date,
+        stock_codes=stock_codes,
+        table_name=table_name,
+        column_overrides=dict(column_override_items),
+        lookback_days=lookback_days,
+        lookahead_days=lookahead_days,
+        db_path=db_path,
+        file_path=file_path,
+        file_bytes=file_bytes,
+        file_name=file_name,
+        sheet_name=sheet_name,
+        local_data_root=local_data_root,
+        adjust=adjust,
+        timeframe=timeframe,
+        indicator_keys=indicator_keys,
+        indicator_root=indicator_root,
+    )
 
 
 def clear_result_state() -> None:
@@ -1525,6 +1580,7 @@ def build_detail_column_config() -> dict[str, object]:
         "最大有利波动": st.column_config.TextColumn("最大有利波动", width="small"),
         "最大不利波动": st.column_config.TextColumn("最大不利波动", width="small"),
         "成交明细": st.column_config.TextColumn("成交明细", width="large"),
+        "板块均线值": st.column_config.TextColumn("板块均线值", width="small"),
     }
 
 
@@ -1657,6 +1713,56 @@ def run_local_data_update(
     result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
     return result.returncode == 0, output.strip()
+
+
+def run_local_indicator_import(
+    *,
+    indicator_key: str,
+    symbols_text: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+    formula_name: str = "",
+    output_map_text: str = "",
+    tdx_tqcenter_path: str = "",
+) -> tuple[bool, str]:
+    normalized_symbols = symbols_text.strip()
+    if not normalized_symbols:
+        return False, "请先输入要导入指标的股票代码。"
+
+    cmd = [
+        sys.executable,
+        "scripts/import_tdx_local_indicators.py",
+        "--indicator",
+        indicator_key,
+        "--symbols",
+        normalized_symbols,
+        "--start-date",
+        start_date,
+        "--end-date",
+        end_date,
+        "--adjust",
+        adjust,
+    ]
+    if formula_name.strip():
+        cmd.extend(["--formula-name", formula_name.strip()])
+    if output_map_text.strip():
+        cmd.extend(["--output-map", output_map_text.strip()])
+
+    env = None
+    normalized_tqcenter_path = normalize_tdx_tqcenter_path(tdx_tqcenter_path)
+    if normalized_tqcenter_path:
+        env = dict(os.environ)
+        env["TDX_TQCENTER_PATH"] = normalized_tqcenter_path
+
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    return result.returncode == 0, output.strip()
+
+
+def probe_local_indicator_candidates(tdx_tqcenter_path: str) -> tuple[list[tuple[str, str]], str]:
+    specs, message = TdxLocalIndicatorProvider.discover_indicator_candidates(tdx_tqcenter_path)
+    return [(spec.key, spec.display_name) for spec in specs], message
 
 
 def build_export_dir_hint(timeframe: str, adjust: str) -> str:
@@ -2171,6 +2277,72 @@ with st.sidebar.expander("数据准备", expanded=False):
     st.caption(
         "分钟级数据已支持 30m / 15m / 5m 更新；当前策略执行与展示仍以现有模型约束为主。"
     )
+    st.markdown("**通达信本地指标导入**")
+    if st.button("探测通达信本地指标", key="offline_indicator_probe"):
+        candidates, probe_message = probe_local_indicator_candidates(
+            str(st.session_state.get("tdx_tqcenter_path", ""))
+        )
+        st.session_state["offline_indicator_candidates"] = candidates
+        st.session_state["offline_indicator_probe_message"] = probe_message
+
+    probe_message = str(st.session_state.get("offline_indicator_probe_message", "")).strip()
+    if probe_message:
+        st.info(probe_message)
+
+    indicator_candidates = cast(
+        list[tuple[str, str]],
+        st.session_state.get("offline_indicator_candidates", [("board_ma", "板块均线")]),
+    )
+    indicator_import_cols = st.columns(2)
+    with indicator_import_cols[0]:
+        indicator_mode = st.radio(
+            "指标来源",
+            options=["已知指标", "手动指定"],
+            horizontal=True,
+            key="offline_indicator_mode",
+        )
+    with indicator_import_cols[1]:
+        indicator_adjust = st.selectbox(
+            "指标复权方式", options=["qfq", "hfq"], index=0, key="offline_indicator_adjust"
+        )
+
+    selected_indicator_key = "board_ma"
+    manual_formula_name = ""
+    manual_output_map_text = ""
+    if indicator_mode == "已知指标":
+        selected_indicator_key = st.selectbox(
+            "本地指标",
+            options=[item[0] for item in indicator_candidates],
+            format_func=lambda value: next((label for key, label in indicator_candidates if key == value), str(value)),
+            key="offline_indicator_key",
+        )
+    else:
+        selected_indicator_key = st.text_input("指标标识", value="board_ma", key="offline_indicator_manual_key").strip() or "board_ma"
+        manual_formula_name = st.text_input("公式名称", value="板块均线", key="offline_indicator_formula_name")
+        manual_output_map_text = st.text_area(
+            "输出映射",
+            value="board_ma_ratio_20=NOTEXT1\nboard_ma_ratio_50=NOTEXT2",
+            help="每行一个映射，格式：目标列=公式输出键。例：board_ma_ratio_20=NOTEXT1",
+            key="offline_indicator_output_map_text",
+        )
+
+    if st.button("导入通达信本地指标", key="offline_indicator_submit"):
+        ok, output = run_local_indicator_import(
+            indicator_key=str(selected_indicator_key),
+            symbols_text=update_symbols,
+            start_date=update_start.strftime("%Y-%m-%d"),
+            end_date=update_end.strftime("%Y-%m-%d"),
+            adjust=str(indicator_adjust),
+            formula_name=manual_formula_name,
+            output_map_text=manual_output_map_text,
+            tdx_tqcenter_path=str(st.session_state.get("tdx_tqcenter_path", "")),
+        )
+        if ok:
+            st.success("本地指标导入完成")
+        else:
+            st.error("本地指标导入失败")
+        if output:
+            st.code(output)
     preview = load_update_log_preview(limit=20)
     if not preview.empty:
         st.markdown("**最近更新日志**")
@@ -2797,6 +2969,32 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
             step=0.1,
             disabled=not enable_atr_filter,
         )
+        board_ma_filter_cols = st.columns(4)
+        enable_board_ma_filter = board_ma_filter_cols[0].checkbox(
+            "启用板块均线占比过滤", value=False
+        )
+        board_ma_filter_line = board_ma_filter_cols[1].selectbox(
+            "占比线",
+            options=["20", "50"],
+            index=["20", "50"].index(str(factor_control_default("board_ma_filter_line"))),
+            format_func=lambda value: str(BOARD_MA_LINE_LABELS.get(str(value), value)),
+            disabled=not enable_board_ma_filter,
+        )
+        board_ma_filter_operator = board_ma_filter_cols[2].selectbox(
+            "比较方向",
+            options=[">=", "<="],
+            index=[">=", "<="].index(str(factor_control_default("board_ma_filter_operator"))),
+            format_func=lambda value: BOARD_MA_OPERATOR_LABELS.get(str(value), str(value)),
+            disabled=not enable_board_ma_filter,
+        )
+        board_ma_filter_threshold = board_ma_filter_cols[3].number_input(
+            "板块均线过滤阈值（%）",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(factor_control_default("board_ma_filter_threshold")),
+            step=1.0,
+            disabled=not enable_board_ma_filter,
+        )
 
     with core_exit_col:
         st.markdown("**退出与风控**")
@@ -2840,6 +3038,32 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
             step=0.1,
             disabled=not enable_profit_drawdown_exit,
             key="min_profit_to_activate_profit_drawdown_pct",
+        )
+        board_ma_exit_cols = st.columns(4)
+        enable_board_ma_exit = board_ma_exit_cols[0].checkbox(
+            "启用板块均线离场（整笔）", value=False
+        )
+        board_ma_exit_line = board_ma_exit_cols[1].selectbox(
+            "离场占比线",
+            options=["20", "50"],
+            index=["20", "50"].index(str(factor_control_default("board_ma_exit_line"))),
+            format_func=lambda value: str(BOARD_MA_LINE_LABELS.get(str(value), value)),
+            disabled=not enable_board_ma_exit,
+        )
+        board_ma_exit_operator = board_ma_exit_cols[2].selectbox(
+            "离场比较方向",
+            options=[">=", "<="],
+            index=[">=", "<="].index(str(factor_control_default("board_ma_exit_operator"))),
+            format_func=lambda value: BOARD_MA_OPERATOR_LABELS.get(str(value), str(value)),
+            disabled=not enable_board_ma_exit,
+        )
+        board_ma_exit_threshold = board_ma_exit_cols[3].number_input(
+            "板块均线离场阈值（%）",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(factor_control_default("board_ma_exit_threshold")),
+            step=1.0,
+            disabled=not enable_board_ma_exit,
         )
         ma_exit_cols = st.columns(2)
         enable_ma_exit = ma_exit_cols[0].checkbox("启用均线离场（整笔）", value=False)
@@ -3198,6 +3422,10 @@ if submitted:
         atr_filter_period=int(atr_filter_period),
         min_atr_filter_pct=float(min_atr_filter_pct),
         max_atr_filter_pct=float(max_atr_filter_pct),
+        enable_board_ma_filter=bool(enable_board_ma_filter),
+        board_ma_filter_line=str(board_ma_filter_line),
+        board_ma_filter_operator=str(board_ma_filter_operator),
+        board_ma_filter_threshold=float(board_ma_filter_threshold),
         time_stop_days=int(time_stop_days),
         time_stop_target_pct=float(time_stop_target_pct),
         stop_loss_pct=float(stop_loss_pct),
@@ -3208,6 +3436,10 @@ if submitted:
         min_profit_to_activate_profit_drawdown_pct=float(
             min_profit_to_activate_profit_drawdown_pct
         ),
+        enable_board_ma_exit=bool(enable_board_ma_exit),
+        board_ma_exit_line=str(board_ma_exit_line),
+        board_ma_exit_operator=str(board_ma_exit_operator),
+        board_ma_exit_threshold=float(board_ma_exit_threshold),
         enable_ma_exit=bool(enable_ma_exit),
         exit_ma_period=int(exit_ma_period),
         enable_atr_trailing_exit=bool(enable_atr_trailing_exit),
@@ -3264,7 +3496,12 @@ if submitted:
     else:
         try:
             with st.spinner("正在运行回测，请稍候..."):
-                all_data = load_market_data_cached(
+                indicator_keys: tuple[str, ...] = (
+                    ("board_ma",)
+                    if params.enable_board_ma_filter or params.enable_board_ma_exit
+                    else ()
+                )
+                all_data = load_market_data_cached_v2(
                     source_type=params.data_source_type,
                     start_date=params.start_date,
                     end_date=params.end_date,
@@ -3283,6 +3520,7 @@ if submitted:
                     local_data_root=params.local_data_root,
                     adjust=params.adjust,
                     timeframe=params.timeframe,
+                    indicator_keys=indicator_keys,
                 )
                 scan_df = pd.DataFrame()
                 best_scan_overrides: dict[str, int | float] = {}

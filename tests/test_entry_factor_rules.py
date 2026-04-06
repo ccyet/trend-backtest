@@ -66,6 +66,17 @@ def make_df(rows: list[tuple[float, float, float, float, float]]) -> pd.DataFram
     )
 
 
+def make_df_with_board_ma(
+    rows: list[tuple[float, float, float, float, float]],
+    board20: list[float],
+    board50: list[float],
+) -> pd.DataFrame:
+    df = make_df(rows)
+    df["board_ma_ratio_20"] = board20
+    df["board_ma_ratio_50"] = board50
+    return df
+
+
 def test_entry_factor_default_is_gap() -> None:
     assert getattr(make_params(), "entry_factor", None) == "gap"
 
@@ -160,6 +171,87 @@ def test_atr_filter_blocks_signal_when_prior_atr_pct_is_below_minimum() -> None:
 
     assert float(result.loc[1, "atr_filter_pct"]) == 2.0
     assert not bool(result.loc[1, "is_signal"])
+
+
+def test_board_ma_filter_blocks_long_signal_when_ratio_below_threshold() -> None:
+    df = make_df_with_board_ma(
+        [(100.0, 101.0, 99.0, 100.0, 1000), (104.0, 105.0, 103.0, 104.0, 1000)],
+        [40.0, 45.0],
+        [35.0, 38.0],
+    )
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="gap",
+            enable_board_ma_filter=True,
+            board_ma_filter_line="20",
+            board_ma_filter_threshold=50.0,
+        ),
+    )
+
+    assert float(result.loc[1, "board_ma_signal_value"]) == 45.0
+    assert not bool(result.loc[1, "is_signal"])
+
+
+def test_board_ma_filter_allows_long_signal_when_ratio_meets_threshold() -> None:
+    df = make_df_with_board_ma(
+        [(100.0, 101.0, 99.0, 100.0, 1000), (104.0, 105.0, 103.0, 104.0, 1000)],
+        [40.0, 55.0],
+        [35.0, 38.0],
+    )
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="gap",
+            enable_board_ma_filter=True,
+            board_ma_filter_line="20",
+            board_ma_filter_threshold=50.0,
+        ),
+    )
+
+    assert bool(result.loc[1, "is_signal"])
+
+
+def test_board_ma_filter_blocks_short_signal_when_ratio_above_threshold() -> None:
+    df = make_df_with_board_ma(
+        [(100.0, 101.0, 99.0, 100.0, 1000), (95.0, 96.0, 94.0, 95.0, 1000)],
+        [60.0, 60.0],
+        [52.0, 52.0],
+    )
+    result = apply_gap_filters(
+        df,
+        make_params(
+            gap_direction="down",
+            entry_factor="gap",
+            gap_pct=2.0,
+            enable_board_ma_filter=True,
+            board_ma_filter_line="50",
+            board_ma_filter_operator="<=",
+            board_ma_filter_threshold=40.0,
+        ),
+    )
+
+    assert not bool(result.loc[1, "is_signal"])
+
+
+def test_board_ma_filter_can_use_less_equal_for_long_signal() -> None:
+    df = make_df_with_board_ma(
+        [(100.0, 101.0, 99.0, 100.0, 1000), (104.0, 105.0, 103.0, 104.0, 1000)],
+        [40.0, 35.0],
+        [35.0, 30.0],
+    )
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="gap",
+            enable_board_ma_filter=True,
+            board_ma_filter_line="20",
+            board_ma_filter_operator="<=",
+            board_ma_filter_threshold=40.0,
+        ),
+    )
+
+    assert bool(result.loc[1, "is_signal"])
 
 
 def test_trend_breakout_long_open_fill_uses_open_price() -> None:
@@ -313,6 +405,88 @@ def test_trend_breakout_zero_volume_is_unfillable() -> None:
 
     assert trade is None
     assert reason == "locked_bar_unfillable"
+
+
+def test_board_ma_exit_triggers_whole_position_exit_for_long_trade() -> None:
+    df = make_df_with_board_ma(
+        [
+            (100.0, 101.0, 99.0, 100.0, 1000),
+            (104.0, 106.0, 103.0, 105.0, 1000),
+            (105.0, 106.0, 104.0, 105.0, 1000),
+        ],
+        [60.0, 55.0, 35.0],
+        [58.0, 56.0, 34.0],
+    )
+    params = make_params(
+        entry_factor="gap",
+        enable_board_ma_exit=True,
+        board_ma_exit_line="20",
+        board_ma_exit_threshold=40.0,
+        enable_take_profit=False,
+    )
+    enriched = apply_gap_filters(df, params)
+    trade, reason = simulate_trade(enriched, 1, params)
+
+    assert reason is None
+    assert trade is not None
+    assert trade["exit_type"] == "board_ma_exit"
+    assert trade["board_ma_value"] == 35.0
+
+
+def test_board_ma_exit_triggers_whole_position_exit_for_short_trade() -> None:
+    df = make_df_with_board_ma(
+        [
+            (100.0, 101.0, 95.0, 99.0, 1000),
+            (94.0, 95.0, 93.0, 94.0, 1000),
+            (93.0, 96.0, 92.0, 95.0, 1000),
+        ],
+        [30.0, 35.0, 65.0],
+        [32.0, 34.0, 66.0],
+    )
+    params = make_params(
+        gap_direction="down",
+        entry_factor="gap",
+        gap_pct=2.0,
+        enable_board_ma_exit=True,
+        board_ma_exit_line="20",
+        board_ma_exit_operator=">=",
+        board_ma_exit_threshold=60.0,
+        enable_take_profit=False,
+    )
+    enriched = apply_gap_filters(df, params)
+    trade, reason = simulate_trade(enriched, 1, params, direction="short")
+
+    assert reason is None
+    assert trade is not None
+    assert trade["exit_type"] == "board_ma_exit"
+    assert trade["board_ma_value"] == 65.0
+
+
+def test_board_ma_exit_can_use_greater_equal_for_long_trade() -> None:
+    df = make_df_with_board_ma(
+        [
+            (100.0, 101.0, 99.0, 100.0, 1000),
+            (104.0, 106.0, 103.0, 105.0, 1000),
+            (105.0, 106.0, 104.0, 105.0, 1000),
+        ],
+        [60.0, 55.0, 65.0],
+        [58.0, 56.0, 64.0],
+    )
+    params = make_params(
+        entry_factor="gap",
+        enable_board_ma_exit=True,
+        board_ma_exit_line="20",
+        board_ma_exit_operator=">=",
+        board_ma_exit_threshold=60.0,
+        enable_take_profit=False,
+    )
+    enriched = apply_gap_filters(df, params)
+    trade, reason = simulate_trade(enriched, 1, params)
+
+    assert reason is None
+    assert trade is not None
+    assert trade["exit_type"] == "board_ma_exit"
+    assert trade["board_ma_value"] == 65.0
 
 
 def test_trend_breakout_missing_volume_remains_fillable() -> None:
