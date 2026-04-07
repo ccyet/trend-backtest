@@ -16,11 +16,24 @@ from data.providers.akshare_provider import AkshareProvider
 
 @dataclass(frozen=True)
 class TdxQuantProvider:
-    """Official TDX Quant local data provider for 1m/5m K-lines."""
+    """Official TDX Quant local data provider for daily and selected minute K-lines."""
 
-    TIMEFRAME_PERIODS: ClassVar[dict[str, str]] = {"1m": "1m", "5m": "5m"}
+    TIMEFRAME_PERIODS: ClassVar[dict[str, str]] = {
+        "1d": "1d",
+        "30m": "30m",
+        "15m": "15m",
+        "5m": "5m",
+        "1m": "1m",
+    }
     ADJUST_MAP: ClassVar[dict[str, str]] = {"": "none", "qfq": "front", "hfq": "back"}
-    REQUIRED_FIELDS: ClassVar[tuple[str, ...]] = ("Open", "High", "Low", "Close", "Volume", "Amount")
+    REQUIRED_FIELDS: ClassVar[tuple[str, ...]] = (
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "Amount",
+    )
     FIELD_ALIASES: ClassVar[dict[str, tuple[str, ...]]] = {
         "Open": ("Open", "open"),
         "High": ("High", "high"),
@@ -45,20 +58,29 @@ class TdxQuantProvider:
 
     @staticmethod
     def _empty_bars() -> pd.DataFrame:
-        return pd.DataFrame(columns=pd.Index(["date", "symbol", "open", "high", "low", "close", "volume", "amount"]))
+        return pd.DataFrame(
+            columns=pd.Index(
+                ["date", "symbol", "open", "high", "low", "close", "volume", "amount"]
+            )
+        )
 
     @staticmethod
     def _has_explicit_time(date_text: str) -> bool:
         return bool(re.search(r"\d{1,2}:\d{2}", str(date_text).strip()))
 
     @staticmethod
-    def _build_filter_window(start_date: str, end_date: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    def _build_filter_window(
+        start_date: str, end_date: str
+    ) -> tuple[pd.Timestamp, pd.Timestamp]:
         start_ts = cast(pd.Timestamp, pd.Timestamp(pd.to_datetime(start_date)))
         end_ts = cast(pd.Timestamp, pd.Timestamp(pd.to_datetime(end_date)))
         if not TdxQuantProvider._has_explicit_time(start_date):
             start_ts = cast(pd.Timestamp, start_ts.normalize())
         if not TdxQuantProvider._has_explicit_time(end_date):
-            end_ts = cast(pd.Timestamp, end_ts.normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1))
+            end_ts = cast(
+                pd.Timestamp,
+                end_ts.normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1),
+            )
         return start_ts, end_ts
 
     @staticmethod
@@ -73,7 +95,10 @@ class TdxQuantProvider:
                 normalized = normalized.parent
 
             candidates: list[Path] = []
-            if normalized.name.lower() == "user" and normalized.parent.name.lower() == "pyplugins":
+            if (
+                normalized.name.lower() == "user"
+                and normalized.parent.name.lower() == "pyplugins"
+            ):
                 candidates.append(normalized)
             elif normalized.name.lower() == "pyplugins":
                 candidates.append(normalized / "user")
@@ -103,7 +128,6 @@ class TdxQuantProvider:
         parsed = cast(pd.Timestamp, pd.Timestamp(pd.to_datetime(value)))
         has_explicit_time = TdxQuantProvider._has_explicit_time(value)
         return parsed.strftime("%Y%m%d%H%M%S" if has_explicit_time else "%Y%m%d")
-
 
     @staticmethod
     def _import_tq() -> Any:
@@ -171,7 +195,9 @@ class TdxQuantProvider:
         return tq
 
     @staticmethod
-    def _resolve_field_key(payload: Mapping[str, Any], canonical_field: str) -> str | None:
+    def _resolve_field_key(
+        payload: Mapping[str, Any], canonical_field: str
+    ) -> str | None:
         aliases = TdxQuantProvider.FIELD_ALIASES[canonical_field]
         for key in aliases:
             if key in payload:
@@ -179,13 +205,17 @@ class TdxQuantProvider:
         return None
 
     @staticmethod
-    def _normalize_bars(raw_data: Any, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    def _normalize_bars(
+        raw_data: Any, symbol: str, start_date: str, end_date: str
+    ) -> pd.DataFrame:
         standardized_symbol = AkshareProvider.to_standard_symbol(symbol)
         if raw_data is None:
             return TdxQuantProvider._empty_bars()
 
         if not isinstance(raw_data, Mapping):
-            raise ValueError(f"official payload must be dict[field]->DataFrame, got {type(raw_data).__name__}")
+            raise ValueError(
+                f"official payload must be dict[field]->DataFrame, got {type(raw_data).__name__}"
+            )
 
         payload = cast(Mapping[str, Any], raw_data)
         if not payload:
@@ -202,16 +232,24 @@ class TdxQuantProvider:
                 continue
             value = payload[resolved_key]
             if not isinstance(value, pd.DataFrame):
-                raise ValueError(f"field {resolved_key} must be DataFrame, got {type(value).__name__}")
+                raise ValueError(
+                    f"field {resolved_key} must be DataFrame, got {type(value).__name__}"
+                )
             selected_frames[field] = value
-            symbol_column_presence[field] = standardized_symbol in {str(c) for c in value.columns}
+            symbol_column_presence[field] = standardized_symbol in {
+                str(c) for c in value.columns
+            }
 
         if missing_fields:
             raise ValueError(f"missing required fields: {missing_fields}")
 
-        missing_symbol_fields = [field for field, present in symbol_column_presence.items() if not present]
+        missing_symbol_fields = [
+            field for field, present in symbol_column_presence.items() if not present
+        ]
         if missing_symbol_fields:
-            raise ValueError(f"missing symbol column {standardized_symbol} in fields: {missing_symbol_fields}")
+            raise ValueError(
+                f"missing symbol column {standardized_symbol} in fields: {missing_symbol_fields}"
+            )
 
         if all(frame.empty for frame in selected_frames.values()):
             return TdxQuantProvider._empty_bars()
@@ -222,10 +260,18 @@ class TdxQuantProvider:
             symbol_column = column_map[standardized_symbol]
             raw_series = cast(pd.Series, frame[symbol_column])
             numeric_values = pd.to_numeric(raw_series.values, errors="coerce")
-            series = pd.Series(numeric_values, index=pd.to_datetime(frame.index, errors="coerce"), name=field)
+            series = pd.Series(
+                numeric_values,
+                index=pd.to_datetime(frame.index, errors="coerce"),
+                name=field,
+            )
             series_map[field] = series
 
-        assembled = pd.concat(series_map, axis=1).reset_index().rename(columns={"index": "date"})
+        assembled = (
+            pd.concat(series_map, axis=1)
+            .reset_index()
+            .rename(columns={"index": "date"})
+        )
         assembled = assembled.rename(columns=TdxQuantProvider.OUTPUT_RENAME)
         assembled["date"] = pd.to_datetime(assembled["date"], errors="coerce")
 
@@ -236,15 +282,26 @@ class TdxQuantProvider:
             assembled[column] = pd.to_numeric(assembled[column], errors="coerce")
 
         assembled["symbol"] = standardized_symbol
-        required_columns = cast(pd.DataFrame, assembled[["date", "open", "high", "low", "close"]])
+        required_columns = cast(
+            pd.DataFrame, assembled[["date", "open", "high", "low", "close"]]
+        )
         out = assembled.loc[required_columns.notna().all(axis=1)].copy()
-        out = out[["date", "symbol", "open", "high", "low", "close", "volume", "amount"]]
+        out = out[
+            ["date", "symbol", "open", "high", "low", "close", "volume", "amount"]
+        ]
         out = out.loc[~out["date"].duplicated(keep="last")].copy()
         out = out.sort_values("date").reset_index(drop=True)
         return cast(pd.DataFrame, out)
 
     @staticmethod
-    def _fetch_market_data(tq: Any, symbol: str, start_date: str, end_date: str, period: str, dividend_type: str) -> Any:
+    def _fetch_market_data(
+        tq: Any,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        period: str,
+        dividend_type: str,
+    ) -> Any:
         formatted_start = TdxQuantProvider._format_market_time(start_date)
         formatted_end = TdxQuantProvider._format_market_time(end_date)
         request_kwargs = {
@@ -259,7 +316,6 @@ class TdxQuantProvider:
         }
         return tq.get_market_data(**request_kwargs)
 
-
     @staticmethod
     def fetch_bars(
         symbol: str,
@@ -270,7 +326,7 @@ class TdxQuantProvider:
     ) -> pd.DataFrame:
         period = TdxQuantProvider.TIMEFRAME_PERIODS.get(timeframe)
         if period is None:
-            raise ValueError("timeframe 仅支持 1m 或 5m。")
+            raise ValueError("timeframe 仅支持 1d、30m、15m、1m 或 5m。")
 
         dividend_type = TdxQuantProvider.ADJUST_MAP.get(adjust)
         if dividend_type is None:
@@ -290,18 +346,28 @@ class TdxQuantProvider:
             )
         except Exception as exc:  # noqa: BLE001
             root_message = str(exc).strip()
-            detail = f"{exc.__class__.__name__}: {root_message}" if root_message else exc.__class__.__name__
+            detail = (
+                f"{exc.__class__.__name__}: {root_message}"
+                if root_message
+                else exc.__class__.__name__
+            )
             raise RuntimeError(
-                "TDX Quant 行情下载失败（fetch阶段）。请确认本机通达信终端已启动并登录，且分钟数据接口可用。"
+                "TDX Quant 行情下载失败（fetch阶段）。请确认本机通达信终端已启动并登录，且目标日线/分钟线数据接口可用。"
                 f" 根因: {detail}"
             ) from exc
 
         try:
-            return TdxQuantProvider._normalize_bars(raw_data, standardized_symbol, start_date, end_date)
+            return TdxQuantProvider._normalize_bars(
+                raw_data, standardized_symbol, start_date, end_date
+            )
         except Exception as exc:  # noqa: BLE001
             root_message = str(exc).strip()
-            detail = f"{exc.__class__.__name__}: {root_message}" if root_message else exc.__class__.__name__
+            detail = (
+                f"{exc.__class__.__name__}: {root_message}"
+                if root_message
+                else exc.__class__.__name__
+            )
             raise RuntimeError(
-                "TDX Quant 行情标准化失败（normalize阶段）。请检查返回数据结构是否符合分钟K线字段约定。"
+                "TDX Quant 行情标准化失败（normalize阶段）。请检查返回数据结构是否符合目标K线字段约定。"
                 f" 根因: {detail}"
             ) from exc
