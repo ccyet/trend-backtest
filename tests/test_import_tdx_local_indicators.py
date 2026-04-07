@@ -14,6 +14,13 @@ def test_import_script_writes_indicator_parquet(tmp_path: Path, monkeypatch) -> 
     pytest.importorskip("pyarrow")
     monkeypatch.setattr(importer, "ROOT", tmp_path)
     monkeypatch.setattr(importer, "INDICATOR_ROOT", tmp_path / "data" / "indicators")
+    monkeypatch.setattr(importer, "sync_registry_manifest", lambda: pd.DataFrame())
+    inventory_rows: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        importer,
+        "upsert_indicator_inventory_row",
+        lambda row: inventory_rows.append(row) or pd.DataFrame([row]),
+    )
 
     monkeypatch.setattr(
         importer.TdxLocalIndicatorProvider,
@@ -42,6 +49,7 @@ def test_import_script_writes_indicator_parquet(tmp_path: Path, monkeypatch) -> 
     assert "rows=2" in message
     saved = pd.read_parquet(tmp_path / "data" / "indicators" / "board_ma" / "000001.SZ.parquet")
     assert saved["board_ma_ratio_20"].tolist() == [55.0, 60.0]
+    assert inventory_rows and inventory_rows[0]["indicator_key"] == "board_ma"
 
 
 def test_parse_args_accepts_indicator(monkeypatch) -> None:

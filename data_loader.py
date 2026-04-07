@@ -11,12 +11,18 @@ from typing import Any, cast
 
 import pandas as pd
 
+from data.indicators.registry import get_indicator_spec, list_indicator_specs
 from data.providers.tdx_local_indicator_provider import TdxLocalIndicatorProvider
+from data.services.indicator_catalog_service import list_indicator_symbols
 from data.services.local_inventory_service import list_local_symbols_by_timeframe
 
 
 REQUIRED_COLUMNS = ("date", "stock_code", "open", "high", "low", "close")
-OPTIONAL_COLUMNS = ("volume", "board_ma_ratio_20", "board_ma_ratio_50")
+BASE_OPTIONAL_COLUMNS = ("volume",)
+INDICATOR_OPTIONAL_COLUMNS = tuple(
+    column for spec in list_indicator_specs() for column in spec.output_columns
+)
+OPTIONAL_COLUMNS = BASE_OPTIONAL_COLUMNS + INDICATOR_OPTIONAL_COLUMNS
 SUPPORTED_FILE_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
 TIMEFRAME_DIR_NAMES = {
     "1d": "daily",
@@ -25,7 +31,7 @@ TIMEFRAME_DIR_NAMES = {
     "5m": "5m",
     "1m": "1m",
 }
-INDICATOR_DIR_NAMES = {"board_ma": "board_ma"}
+INDICATOR_DIR_NAMES = {spec.key: spec.storage_key for spec in list_indicator_specs()}
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "data_source.yaml"
 DEFAULT_OFFLINE_UPDATE_SOURCES = {
@@ -400,29 +406,24 @@ def _load_local_indicator_frame(
     end_date: str,
     indicator_root: str = "data/indicators",
 ) -> pd.DataFrame:
-    indicator_dir_name = INDICATOR_DIR_NAMES.get(indicator_key, indicator_key)
+    spec = get_indicator_spec(indicator_key)
+    indicator_dir_name = INDICATOR_DIR_NAMES.get(indicator_key, spec.storage_key)
     indicator_dir = Path(indicator_root) / indicator_dir_name
+    empty_columns = ["date", "stock_code", *spec.output_columns]
     if not indicator_dir.exists():
-        return pd.DataFrame(
-            columns=pd.Index(
-                ["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]
-            )
-        )
+        return pd.DataFrame(columns=pd.Index(empty_columns))
 
     normalized_codes = tuple(
         code.strip().upper() for code in (stock_codes or ()) if code.strip()
     )
-    symbols = (
-        list(normalized_codes)
-        if normalized_codes
-        else sorted(path.stem.upper() for path in indicator_dir.glob("*.parquet"))
+    symbols = list(normalized_codes) if normalized_codes else list_indicator_symbols(
+        indicator_key=indicator_key,
+        timeframe=spec.required_timeframe,
     )
     if not symbols:
-        return pd.DataFrame(
-            columns=pd.Index(
-                ["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]
-            )
-        )
+        symbols = sorted(path.stem.upper() for path in indicator_dir.glob("*.parquet"))
+    if not symbols:
+        return pd.DataFrame(columns=pd.Index(empty_columns))
 
     frames: list[pd.DataFrame] = []
     start_ts = cast(pd.Timestamp, pd.to_datetime(start_date)).normalize()
@@ -440,17 +441,16 @@ def _load_local_indicator_frame(
             frame = frame.rename(columns={"symbol": "stock_code"})
         if "date" not in frame.columns or "stock_code" not in frame.columns:
             continue
+        for output_column in spec.output_columns:
+            if output_column not in frame.columns:
+                frame[output_column] = pd.NA
         frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
         frame["stock_code"] = frame["stock_code"].astype(str).str.upper()
         frame = frame.loc[frame["date"].between(start_ts, end_ts)].copy()
-        frames.append(frame)
+        frames.append(frame[["date", "stock_code", *spec.output_columns]])
 
     if not frames:
-        return pd.DataFrame(
-            columns=pd.Index(
-                ["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]
-            )
-        )
+        return pd.DataFrame(columns=pd.Index(empty_columns))
     return cast(pd.DataFrame, pd.concat(frames, ignore_index=True))
 
 

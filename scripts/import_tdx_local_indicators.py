@@ -14,6 +14,10 @@ if str(ROOT) not in sys.path:
 
 from data.providers.akshare_provider import AkshareProvider
 from data.providers.tdx_local_indicator_provider import TdxLocalIndicatorProvider
+from data.services.indicator_catalog_service import (
+    sync_registry_manifest,
+    upsert_indicator_inventory_row,
+)
 
 
 INDICATOR_ROOT = ROOT / "data" / "indicators"
@@ -74,7 +78,9 @@ def import_one_symbol(
     output_map: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     standardized_symbol = AkshareProvider.to_standard_symbol(symbol)
-    target_path = _indicator_dir(indicator_key) / f"{standardized_symbol}.parquet"
+    target_dir = _indicator_dir(indicator_key)
+    target_path = target_dir / f"{standardized_symbol}.parquet"
+    sync_registry_manifest()
     try:
         df = TdxLocalIndicatorProvider.import_indicator(
             symbol=standardized_symbol,
@@ -86,8 +92,63 @@ def import_one_symbol(
             output_map=output_map,
         )
         df.to_parquet(target_path, index=False)
+        normalized_dates = pd.to_datetime(df["date"], errors="coerce")
+        output_columns = [
+            column for column in df.columns if column not in {"date", "symbol", "stock_code"}
+        ]
+        spec = (
+            TdxLocalIndicatorProvider.build_manual_spec(
+                indicator_key=indicator_key,
+                formula_name=formula_name,
+                output_map=output_map,
+            )
+            if str(formula_name).strip()
+            else TdxLocalIndicatorProvider.get_indicator_spec(indicator_key)
+        )
+        upsert_indicator_inventory_row(
+            {
+                "indicator_key": indicator_key,
+                "display_name": spec.display_name,
+                "source_type": spec.source_type,
+                "symbol": standardized_symbol,
+                "timeframe": spec.required_timeframe,
+                "adjust": adjust,
+                "file_path": str(target_path),
+                "row_count": int(len(df)),
+                "non_null_columns": ", ".join(
+                    column
+                    for column in output_columns
+                    if bool(df[column].notna().any())
+                ),
+                "min_date": normalized_dates.min() if not normalized_dates.empty else pd.NaT,
+                "max_date": normalized_dates.max() if not normalized_dates.empty else pd.NaT,
+                "last_success_at": pd.Timestamp.utcnow(),
+                "last_update_status": "success",
+                "last_error_message": "",
+                "updated_at": pd.Timestamp.utcnow(),
+            }
+        )
         return True, f"[{indicator_key}] {standardized_symbol}: rows={len(df)}"
     except Exception as exc:  # noqa: BLE001
+        upsert_indicator_inventory_row(
+            {
+                "indicator_key": indicator_key,
+                "display_name": indicator_key,
+                "source_type": "tdx_formula_local",
+                "symbol": standardized_symbol,
+                "timeframe": "1d",
+                "adjust": adjust,
+                "file_path": str(target_path),
+                "row_count": 0,
+                "non_null_columns": "",
+                "min_date": pd.NaT,
+                "max_date": pd.NaT,
+                "last_success_at": pd.NaT,
+                "last_update_status": "failed",
+                "last_error_message": str(exc),
+                "updated_at": pd.Timestamp.utcnow(),
+            }
+        )
         return False, f"[{indicator_key}] {standardized_symbol}: failed -> {exc}"
 
 

@@ -7,38 +7,27 @@ import pandas as pd
 
 from data.providers.akshare_provider import AkshareProvider
 from data.providers.tdx_quant_provider import TdxQuantProvider
+from data.indicators.registry import (
+    IndicatorSpec,
+    build_manual_indicator_spec,
+    get_indicator_spec,
+    list_indicator_specs,
+)
 
 
-@dataclass(frozen=True)
-class TdxLocalIndicatorSpec:
-    key: str
-    display_name: str
-    formula_name: str
-    output_candidates: dict[str, tuple[str, ...]]
-    formula_arg: str = ""
-    stock_period: str = "1d"
-    lookback_days: int = 120
+TdxLocalIndicatorSpec = IndicatorSpec
 
 
 @dataclass(frozen=True)
 class TdxLocalIndicatorProvider:
     INDICATOR_REGISTRY: ClassVar[dict[str, TdxLocalIndicatorSpec]] = {
-        "board_ma": TdxLocalIndicatorSpec(
-            key="board_ma",
-            display_name="板块均线",
-            formula_name="板块均线",
-            output_candidates={
-                "board_ma_ratio_20": ("均20占比", "NOTEXT1"),
-                "board_ma_ratio_50": ("均50占比", "NOTEXT2"),
-            },
-            lookback_days=120,
-        )
+        spec.key: spec for spec in list_indicator_specs()
     }
     FORMULA_ADJUST_MAP: ClassVar[dict[str, int]] = {"": 0, "qfq": 1, "hfq": 2}
 
     @staticmethod
     def list_indicators() -> list[TdxLocalIndicatorSpec]:
-        return list(TdxLocalIndicatorProvider.INDICATOR_REGISTRY.values())
+        return list_indicator_specs()
 
     @staticmethod
     def discover_indicator_candidates(tdx_tqcenter_path: str = "") -> tuple[list[TdxLocalIndicatorSpec], str]:
@@ -71,20 +60,19 @@ class TdxLocalIndicatorProvider:
         }
         if not output_candidates:
             raise ValueError("输出映射不能为空。")
-        return TdxLocalIndicatorSpec(
-            key=normalized_key,
-            display_name=str(display_name or normalized_formula).strip() or normalized_formula,
+        return build_manual_indicator_spec(
+            indicator_key=normalized_key,
             formula_name=normalized_formula,
-            output_candidates=output_candidates,
+            display_name=display_name,
+            output_map={
+                target_column: candidate_keys[0]
+                for target_column, candidate_keys in output_candidates.items()
+            },
         )
 
     @staticmethod
     def get_indicator_spec(indicator_key: str) -> TdxLocalIndicatorSpec:
-        spec = TdxLocalIndicatorProvider.INDICATOR_REGISTRY.get(str(indicator_key).strip())
-        if spec is None:
-            supported = ", ".join(sorted(TdxLocalIndicatorProvider.INDICATOR_REGISTRY))
-            raise ValueError(f"不支持的本地指标: {indicator_key}。可选: {supported}")
-        return spec
+        return get_indicator_spec(indicator_key)
 
     @staticmethod
     def _fetch_formula_payload(
