@@ -7,7 +7,10 @@
 
 ## 1. 目前支持的核心能力
 
-- **离线行情更新**（AKShare 仅用于下载层，回测核心不直接依赖）
+- **离线行情更新**（支持按周期选择 AKShare / TDX 数据源）
+- **通达信量化（TdxQuant）能力接入**
+  - 支持通过本机通达信量化终端获取历史 **日线 / 1m / 5m** K 线数据
+  - 支持调用通达信公式并将结果落地为本地 parquet 指标文件
 - **多数据源回测输入**：本地 Parquet / SQLite / 上传 Excel/CSV
 - **单账户单持仓回测框架**（研究型 long/short 镜像）
 - **五类入场因子**
@@ -155,10 +158,10 @@
 ## 4. 项目结构（核心模块）
 
 ```text
-app.py            # Streamlit 界面与参数组装
+app.py            # Streamlit 界面、参数组装、结果展示
 models.py         # 参数模型、扫描配置、参数校验
 rules.py          # 入场筛选、成交模拟、退出语义
-analyzer.py       # 候选交易、策略交易、净值与扫描汇总
+analyzer.py       # 候选交易、策略交易、净值/扫描汇总、run_backtest 结果层 API
 exporter.py       # Excel 导出
 
 scripts/update_data.py
@@ -173,28 +176,43 @@ data/services/local_data_service.py
 ### 5.1 离线更新流
 
 1. UI 或 CLI 调用 `scripts/update_data.py`
-2. `data/providers/akshare_provider.py` 拉取日线（股票 / ETF / 指数分别选择可用源）
-3. 清洗标准化后落地 parquet
+2. 按周期解析更新源（`AKShare` / `TDX`）
+3. 对应 provider 拉取历史 K 线并清洗标准化后落地 parquet
 4. 更新日志到 `data/market/metadata/update_log.parquet`
 
 补充说明：
 
 - ETF 优先走 `fund_etf_hist_em`
 - 指数优先走 `index_zh_a_hist`
+- 当前默认配置为：`1d/30m/15m -> AKShare`，`5m/1m -> TDX`
+- 当前更新链路已支持 `1d / 30m / 15m / 5m / 1m` 按周期切换 `AKShare / TDX` 数据源；默认值仍保持现有较稳妥配置
 - 标准化结果统一保留 `volume` / `amount` 字段
+
+### 5.1.1 通达信量化（TdxQuant）补充说明
+
+- 当前仓库已接入 **通达信量化平台** 本地能力，重点用于：
+  1. 获取历史 **日线 / 1m / 5m** K 线数据
+  2. 调用通达信公式，生成本地指标 parquet
+- 运行前提：本机需安装并登录支持 TQ 功能的通达信终端，并可通过 `TDX_TQCENTER_PATH` 暴露 `PYPlugins/user`
+- `scripts/import_tdx_local_indicators.py` 当前内置 `board_ma` 指标，也支持手动指定：
+  - `--formula-name`
+  - `--output-map`
+- 当前未宣称仓库已具备“通达信公式自动枚举”能力；未命中内置指标时，按手动公式名称与输出映射导入
 
 ### 5.2 回测流
 
 1. UI 提交参数
 2. `models.py` 构建并校验 `AnalysisParams`
-3. `analyzer.py -> rules.py` 执行信号筛选和交易模拟
-4. 输出明细、日统计、净值、扫描结果并可导出
+3. `analyzer.run_backtest(...)` 统一调度组合回测 / 逐股回测 / 参数扫描
+4. `analyzer.py -> rules.py` 执行信号筛选和交易模拟，并组装结果层 bundle
+5. UI 输出明细、日统计、净值、扫描结果并可导出
 
 补充说明：
 
 - 当前执行周期默认为 `1d`
 - `timeframe` 已预留 `1d / 30m / 15m` 插座，并已贯通到本地加载路径
 - 现阶段 `30m / 15m` 仍作为保留能力，参数校验会明确提示“后续扩展”
+- `run_parameter_scan(...)` 当前会复用共享扫描上下文（按股票分组、必要时一次性预载 ESHB 5m 执行数据），减少重复准备开销
 
 ---
 
@@ -223,6 +241,38 @@ python scripts/update_data.py --start-date 2024-01-01 --end-date 2024-12-31 --ad
 - `--symbols 000001.SZ,600519.SH`
 - `--refresh-symbols`
 - `--export-excel`
+- `--timeframe 1d --timeframe 30m`
+- `--provider 1d=tdx --provider 5m=akshare`（按周期覆盖默认更新源）
+
+如需通过通达信量化能力更新分钟级数据，可使用：
+
+```bash
+set TDX_TQCENTER_PATH=C:\path\to\TdxInstall\PYPlugins\user
+python scripts/update_data.py --symbols 000001.SZ --start-date 2024-01-01 --end-date 2024-01-31 --adjust qfq --timeframe 1m --timeframe 5m
+```
+
+如需按周期混合使用 AKShare / TDX，可使用：
+
+```bash
+set TDX_TQCENTER_PATH=C:\path\to\TdxInstall\PYPlugins\user
+python scripts/update_data.py --symbols 000001.SZ --start-date 2024-01-01 --end-date 2024-01-31 --adjust qfq --timeframe 1d --timeframe 5m --provider 1d=akshare --provider 5m=tdx
+```
+
+`30m / 15m` 也可使用同样的 `--provider timeframe=source` 方式切换更新源。
+
+如需调用通达信公式并导入本地指标，可使用：
+
+```bash
+set TDX_TQCENTER_PATH=C:\path\to\TdxInstall\PYPlugins\user
+python scripts/import_tdx_local_indicators.py --indicator board_ma --symbols 000001.SZ --start-date 2024-01-01 --end-date 2024-01-31 --adjust qfq
+```
+
+手动公式模式示例：
+
+```bash
+set TDX_TQCENTER_PATH=C:\path\to\TdxInstall\PYPlugins\user
+python scripts/import_tdx_local_indicators.py --indicator board_ma --symbols 000001.SZ --start-date 2024-01-01 --end-date 2024-01-31 --adjust qfq --formula-name 板块均线 --output-map board_ma_ratio_20=NOTEXT1,board_ma_ratio_50=NOTEXT2
+```
 
 ---
 
@@ -268,6 +318,8 @@ python -m unittest tests.test_app_display_formatters_unittest -v
 - 连续K线追势 / 加速追势的 long/short 信号与策略级统计
 - 分批退出、总利润回撤、时间退出
 - 参数扫描边界与导出
+- 混合更新源与按周期 provider 路由
+- 参数扫描共享上下文复用
 - Streamlit 展示表的数字格式回归
 - Streamlit 工作台中的新策略选项 / 周期插座 UI 回归
 
@@ -284,6 +336,7 @@ python -m unittest tests.test_app_display_formatters_unittest -v
 
 - 当前为**日线研究工具**，不是逐笔撮合回测器。
 - `30m / 15m` 当前仅为预留插座，尚未开放完整多周期回测执行。
+- `1m / 5m` 当前主要用于离线数据更新、通达信量化接入与局部执行链路（如 `early_surge_high_base` 的 5m 执行）；并不代表通用分钟级策略工作台已全部开放。
 - short 方向仅用于研究镜像，不代表可直接实盘融券执行。
 - 一字板/锁死成交等仅能在日线层做保守近似过滤。
 - 建议优先做“粗扫→细扫”，避免一次性多轴爆炸。
