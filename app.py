@@ -1,33 +1,31 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import date, timedelta
 from io import BytesIO
-import os
 from pathlib import Path
 import sqlite3
-import subprocess
-import sys
 from typing import Any, cast
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from analyzer import (
-    analyze_all_stocks,
-    build_drawdown_diagnostics,
-    build_trade_anomaly_queue,
-    build_trade_behavior_overview,
-    run_parameter_scan,
-)
+from analyzer import run_backtest
 from data_loader import (
+    build_export_dir_hint,
     describe_file_source,
+    get_supported_update_sources,
     describe_tables,
     list_candidate_tables,
     list_file_sheets,
     load_market_data,
+    normalize_tdx_tqcenter_path,
+    probe_local_indicator_candidates,
     quote_ident,
+    read_data_source_config,
+    resolve_offline_update_sources,
+    run_local_data_update,
+    run_local_indicator_import,
 )
 from data.services.local_inventory_service import load_inventory
 from exporter import export_to_excel_bytes
@@ -46,7 +44,6 @@ from models import (
     parse_scan_values,
     validate_params,
 )
-from data.providers.tdx_local_indicator_provider import TdxLocalIndicatorProvider
 
 
 st.set_page_config(layout="wide", page_title="Gap_test 回测系统")
@@ -406,6 +403,7 @@ ANOMALY_COLUMN_LABELS = {
 UPDATE_LOG_COLUMN_LABELS = {
     "symbol": "股票代码",
     "timeframe": "周期",
+    "provider": "更新源",
     "adjust": "复权方式",
     "start_date": "开始日期",
     "end_date": "结束日期",
@@ -434,6 +432,10 @@ LOCAL_INVENTORY_COLUMN_LABELS = {
     "last_update_status": "状态",
 }
 TIMEFRAME_OPTIONS = ("1d", "30m", "15m", "5m")
+UPDATE_SOURCE_LABELS = {
+    "akshare": "AKShare 在线",
+    "tdx": "通达信 TDX",
+}
 
 
 def dataframe_stretch(
@@ -685,23 +687,6 @@ def pick_tdx_tqcenter_path(current_path: str) -> tuple[str, str | None]:
             current_path,
             f"无法打开目录选择窗口：{exc}。可继续使用当前路径或稍后重试。",
         )
-
-
-def normalize_tdx_tqcenter_path(path_text: str) -> str:
-    cleaned = path_text.strip().strip('"')
-    if not cleaned:
-        return ""
-
-    candidate = Path(cleaned).expanduser()
-    if candidate.name.lower() == "tqcenter.py":
-        return str(candidate.parent)
-    if candidate.name.lower() == "user" and candidate.parent.name.lower() == "pyplugins":
-        return str(candidate)
-    if candidate.name.lower() == "pyplugins":
-        return str(candidate / "user")
-    if (candidate / "tqcenter.py").exists():
-        return str(candidate)
-    return str(candidate / "PYPlugins" / "user")
 
 
 def get_direction_options(entry_factor: str) -> list[str]:
@@ -1665,114 +1650,6 @@ def build_local_inventory_column_config() -> dict[str, object]:
     }
 
 
-def run_local_data_update(
-    symbols_text: str,
-    start_date: str,
-    end_date: str,
-    adjust: str,
-    timeframes: list[str],
-    refresh_symbols: bool,
-    export_excel: bool,
-    tdx_tqcenter_path: str = "",
-) -> tuple[bool, str]:
-    cmd = [
-        sys.executable,
-        "scripts/update_data.py",
-        "--start-date",
-        start_date,
-        "--end-date",
-        end_date,
-    ]
-    if adjust:
-        cmd.extend(["--adjust", adjust])
-    normalized_timeframes = [str(item).strip() for item in timeframes if str(item).strip()]
-    if not normalized_timeframes:
-        normalized_timeframes = ["1d"]
-    deduped_timeframes: list[str] = []
-    seen_timeframes: set[str] = set()
-    for timeframe in normalized_timeframes:
-        if timeframe in seen_timeframes:
-            continue
-        seen_timeframes.add(timeframe)
-        deduped_timeframes.append(timeframe)
-    for timeframe in deduped_timeframes:
-        cmd.extend(["--timeframe", timeframe])
-    if symbols_text.strip():
-        cmd.extend(["--symbols", symbols_text.strip()])
-    if refresh_symbols:
-        cmd.append("--refresh-symbols")
-    if export_excel:
-        cmd.append("--export-excel")
-
-    env = None
-    normalized_tqcenter_path = normalize_tdx_tqcenter_path(tdx_tqcenter_path)
-    if normalized_tqcenter_path:
-        env = dict(os.environ)
-        env["TDX_TQCENTER_PATH"] = normalized_tqcenter_path
-
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
-    return result.returncode == 0, output.strip()
-
-
-def run_local_indicator_import(
-    *,
-    indicator_key: str,
-    symbols_text: str,
-    start_date: str,
-    end_date: str,
-    adjust: str,
-    formula_name: str = "",
-    output_map_text: str = "",
-    tdx_tqcenter_path: str = "",
-) -> tuple[bool, str]:
-    normalized_symbols = symbols_text.strip()
-    if not normalized_symbols:
-        return False, "请先输入要导入指标的股票代码。"
-
-    cmd = [
-        sys.executable,
-        "scripts/import_tdx_local_indicators.py",
-        "--indicator",
-        indicator_key,
-        "--symbols",
-        normalized_symbols,
-        "--start-date",
-        start_date,
-        "--end-date",
-        end_date,
-        "--adjust",
-        adjust,
-    ]
-    if formula_name.strip():
-        cmd.extend(["--formula-name", formula_name.strip()])
-    if output_map_text.strip():
-        cmd.extend(["--output-map", output_map_text.strip()])
-
-    env = None
-    normalized_tqcenter_path = normalize_tdx_tqcenter_path(tdx_tqcenter_path)
-    if normalized_tqcenter_path:
-        env = dict(os.environ)
-        env["TDX_TQCENTER_PATH"] = normalized_tqcenter_path
-
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
-    return result.returncode == 0, output.strip()
-
-
-def probe_local_indicator_candidates(tdx_tqcenter_path: str) -> tuple[list[tuple[str, str]], str]:
-    specs, message = TdxLocalIndicatorProvider.discover_indicator_candidates(tdx_tqcenter_path)
-    return [(spec.key, spec.display_name) for spec in specs], message
-
-
-def build_export_dir_hint(timeframe: str, adjust: str) -> str:
-    return (
-        f"data/market/exports/{adjust}/"
-        if timeframe == "1d"
-        else f"data/market/exports/{timeframe}/{adjust}/"
-    )
-
-
 def load_update_log_preview(limit: int = 20) -> pd.DataFrame:
     log_file = Path("data/market/metadata/update_log.parquet")
     if not log_file.exists():
@@ -2152,6 +2029,7 @@ st.sidebar.header("运行设置")
 st.sidebar.caption("左侧聚焦回测范围与数据源选择，详细规则放在主区域。")
 with st.sidebar.expander("数据准备", expanded=False):
     st.caption("推荐先离线更新本地 parquet，再进行回测。")
+    update_source_defaults = resolve_offline_update_sources(read_data_source_config())
     update_symbols = st.text_area(
         "股票代码（可选）",
         value="",
@@ -2177,7 +2055,7 @@ with st.sidebar.expander("数据准备", expanded=False):
         st.session_state["tdx_tqcenter_path_display"] = st.session_state[
             "tdx_tqcenter_path"
         ]
-    st.caption("通达信安装目录（用于 1m / 5m 数据更新）")
+    st.caption("通达信安装目录（在使用 TDX 作为更新源时生效）")
     picker_cols = st.columns(2)
     if picker_cols[0].button(
         "选择通达信目录",
@@ -2228,8 +2106,12 @@ with st.sidebar.expander("数据准备", expanded=False):
         st.session_state["offline_update_start"] = ytd_start_date(today)
         st.session_state["offline_update_end"] = today
     update_date_cols = st.columns(2)
-    update_start = update_date_cols[0].date_input("更新开始日期", key="offline_update_start")
-    update_end = update_date_cols[1].date_input("更新结束日期", key="offline_update_end")
+    update_start = update_date_cols[0].date_input(
+        "更新开始日期", key="offline_update_start"
+    )
+    update_end = update_date_cols[1].date_input(
+        "更新结束日期", key="offline_update_end"
+    )
     update_option_cols = st.columns(2)
     with update_option_cols[0]:
         update_timeframes = st.multiselect(
@@ -2248,15 +2130,40 @@ with st.sidebar.expander("数据准备", expanded=False):
         export_excel_after_update = st.checkbox(
             "更新后另存为 Excel", value=False, key="offline_update_export"
         )
+    update_provider_overrides: dict[str, str] = {}
+    selected_update_timeframes = [str(item) for item in update_timeframes]
+    if selected_update_timeframes:
+        st.caption("各周期更新源")
+        for timeframe_option in selected_update_timeframes:
+            supported_sources = get_supported_update_sources(timeframe_option)
+            default_source = update_source_defaults.get(
+                timeframe_option, supported_sources[0]
+            )
+            default_index = (
+                supported_sources.index(default_source)
+                if default_source in supported_sources
+                else 0
+            )
+            selected_provider = st.selectbox(
+                f"{timeframe_option} 更新源",
+                options=list(supported_sources),
+                index=default_index,
+                key=f"offline_update_provider_{timeframe_option}",
+                format_func=lambda value: UPDATE_SOURCE_LABELS.get(
+                    str(value), str(value)
+                ),
+            )
+            update_provider_overrides[timeframe_option] = str(selected_provider)
     if st.button("开始更新本地数据", key="offline_update_submit"):
         ok, output = run_local_data_update(
             symbols_text=update_symbols,
             start_date=update_start.strftime("%Y-%m-%d"),
             end_date=update_end.strftime("%Y-%m-%d"),
             adjust=update_adjust,
-            timeframes=[str(item) for item in update_timeframes],
+            timeframes=selected_update_timeframes,
             refresh_symbols=bool(refresh_symbol_meta),
             export_excel=bool(export_excel_after_update),
+            provider_overrides=update_provider_overrides,
             tdx_tqcenter_path=str(st.session_state.get("tdx_tqcenter_path", "")),
         )
         if ok:
@@ -2268,14 +2175,16 @@ with st.sidebar.expander("数据准备", expanded=False):
             + "、".join(
                 [
                     build_export_dir_hint(str(timeframe), str(update_adjust))
-                    for timeframe in ([str(item) for item in update_timeframes] or ["1d"])
+                    for timeframe in (
+                        [str(item) for item in update_timeframes] or ["1d"]
+                    )
                 ]
             )
         )
         if output:
             st.code(output)
     st.caption(
-        "分钟级数据已支持 30m / 15m / 5m 更新；当前策略执行与展示仍以现有模型约束为主。"
+        "当前支持按周期分别选择 AKShare / TDX 更新源；当前更新链路已覆盖 1d / 30m / 15m / 5m。"
     )
     st.markdown("**通达信本地指标导入**")
     if st.button("探测通达信本地指标", key="offline_indicator_probe"):
@@ -2285,13 +2194,17 @@ with st.sidebar.expander("数据准备", expanded=False):
         st.session_state["offline_indicator_candidates"] = candidates
         st.session_state["offline_indicator_probe_message"] = probe_message
 
-    probe_message = str(st.session_state.get("offline_indicator_probe_message", "")).strip()
+    probe_message = str(
+        st.session_state.get("offline_indicator_probe_message", "")
+    ).strip()
     if probe_message:
         st.info(probe_message)
 
     indicator_candidates = cast(
         list[tuple[str, str]],
-        st.session_state.get("offline_indicator_candidates", [("board_ma", "板块均线")]),
+        st.session_state.get(
+            "offline_indicator_candidates", [("board_ma", "板块均线")]
+        ),
     )
     indicator_import_cols = st.columns(2)
     with indicator_import_cols[0]:
@@ -2303,7 +2216,10 @@ with st.sidebar.expander("数据准备", expanded=False):
         )
     with indicator_import_cols[1]:
         indicator_adjust = st.selectbox(
-            "指标复权方式", options=["qfq", "hfq"], index=0, key="offline_indicator_adjust"
+            "指标复权方式",
+            options=["qfq", "hfq"],
+            index=0,
+            key="offline_indicator_adjust",
         )
 
     selected_indicator_key = "board_ma"
@@ -2313,12 +2229,22 @@ with st.sidebar.expander("数据准备", expanded=False):
         selected_indicator_key = st.selectbox(
             "本地指标",
             options=[item[0] for item in indicator_candidates],
-            format_func=lambda value: next((label for key, label in indicator_candidates if key == value), str(value)),
+            format_func=lambda value: next(
+                (label for key, label in indicator_candidates if key == value),
+                str(value),
+            ),
             key="offline_indicator_key",
         )
     else:
-        selected_indicator_key = st.text_input("指标标识", value="board_ma", key="offline_indicator_manual_key").strip() or "board_ma"
-        manual_formula_name = st.text_input("公式名称", value="板块均线", key="offline_indicator_formula_name")
+        selected_indicator_key = (
+            st.text_input(
+                "指标标识", value="board_ma", key="offline_indicator_manual_key"
+            ).strip()
+            or "board_ma"
+        )
+        manual_formula_name = st.text_input(
+            "公式名称", value="板块均线", key="offline_indicator_formula_name"
+        )
         manual_output_map_text = st.text_area(
             "输出映射",
             value="board_ma_ratio_20=NOTEXT1\nboard_ma_ratio_50=NOTEXT2",
@@ -2611,7 +2537,9 @@ with st.sidebar.expander("回测概览", expanded=True):
                         "列数": description.get("column_count", 0),
                         "列预览": description.get("columns_preview", ""),
                         "字段识别结果": description.get("detected_fields", ""),
-                        "自动识别成功": "是" if description.get("auto_detected") else "否",
+                        "自动识别成功": "是"
+                        if description.get("auto_detected")
+                        else "否",
                     }
                 ]
             )
@@ -2623,7 +2551,9 @@ with st.sidebar.expander("回测概览", expanded=True):
             and not file_probe_payload["preview_df"].empty
         ):
             st.markdown("**前 20 行数据预览**")
-            dataframe_stretch(file_probe_payload["preview_df"], hide_index=True, height=240)
+            dataframe_stretch(
+                file_probe_payload["preview_df"], hide_index=True, height=240
+            )
 
 submitted = st.sidebar.button("开始回测", type="primary", key="run_backtest")
 st.sidebar.caption("结果会在当前页面下方的标签页中展示。")
@@ -2976,15 +2906,21 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
         board_ma_filter_line = board_ma_filter_cols[1].selectbox(
             "占比线",
             options=["20", "50"],
-            index=["20", "50"].index(str(factor_control_default("board_ma_filter_line"))),
+            index=["20", "50"].index(
+                str(factor_control_default("board_ma_filter_line"))
+            ),
             format_func=lambda value: str(BOARD_MA_LINE_LABELS.get(str(value), value)),
             disabled=not enable_board_ma_filter,
         )
         board_ma_filter_operator = board_ma_filter_cols[2].selectbox(
             "比较方向",
             options=[">=", "<="],
-            index=[">=", "<="].index(str(factor_control_default("board_ma_filter_operator"))),
-            format_func=lambda value: BOARD_MA_OPERATOR_LABELS.get(str(value), str(value)),
+            index=[">=", "<="].index(
+                str(factor_control_default("board_ma_filter_operator"))
+            ),
+            format_func=lambda value: BOARD_MA_OPERATOR_LABELS.get(
+                str(value), str(value)
+            ),
             disabled=not enable_board_ma_filter,
         )
         board_ma_filter_threshold = board_ma_filter_cols[3].number_input(
@@ -3053,8 +2989,12 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
         board_ma_exit_operator = board_ma_exit_cols[2].selectbox(
             "离场比较方向",
             options=[">=", "<="],
-            index=[">=", "<="].index(str(factor_control_default("board_ma_exit_operator"))),
-            format_func=lambda value: BOARD_MA_OPERATOR_LABELS.get(str(value), str(value)),
+            index=[">=", "<="].index(
+                str(factor_control_default("board_ma_exit_operator"))
+            ),
+            format_func=lambda value: BOARD_MA_OPERATOR_LABELS.get(
+                str(value), str(value)
+            ),
             disabled=not enable_board_ma_exit,
         )
         board_ma_exit_threshold = board_ma_exit_cols[3].number_input(
@@ -3522,128 +3462,25 @@ if submitted:
                     timeframe=params.timeframe,
                     indicator_keys=indicator_keys,
                 )
-                scan_df = pd.DataFrame()
-                best_scan_overrides: dict[str, int | float] = {}
-                per_stock_stats_df = pd.DataFrame()
-                if is_batch_per_stock_mode:
-                    batch_detail_frames: list[pd.DataFrame] = []
-                    batch_daily_frames: list[pd.DataFrame] = []
-                    batch_equity_frames: list[pd.DataFrame] = []
-                    batch_rows: list[dict[str, Any]] = []
-                    for stock_code in params.stock_codes:
-                        single_params = replace(
-                            params,
-                            stock_codes=(stock_code,),
-                            scan_config=replace(params.scan_config, enabled=False, axes=()),
-                        )
-                        stock_data = all_data.loc[
-                            all_data["stock_code"].astype(str) == str(stock_code)
-                        ].copy()
-                        (
-                            single_detail_df,
-                            single_daily_df,
-                            single_equity_df,
-                            single_stats,
-                        ) = analyze_all_stocks(stock_data, single_params)
-                        if not single_detail_df.empty:
-                            single_detail_df = single_detail_df.copy()
-                            single_detail_df["batch_stock_code"] = stock_code
-                            batch_detail_frames.append(single_detail_df)
-                        if not single_daily_df.empty:
-                            single_daily_df = single_daily_df.copy()
-                            single_daily_df["batch_stock_code"] = stock_code
-                            batch_daily_frames.append(single_daily_df)
-                        if not single_equity_df.empty:
-                            single_equity_df = single_equity_df.copy()
-                            single_equity_df["batch_stock_code"] = stock_code
-                            batch_equity_frames.append(single_equity_df)
-                        batch_rows.append(
-                            {
-                                "stock_code": stock_code,
-                                "signal_count": int(single_stats.get("signal_count", 0)),
-                                "executed_trades": int(
-                                    single_stats.get("executed_trades", 0)
-                                ),
-                                "total_return_pct": float(
-                                    single_stats.get("total_return_pct", 0.0)
-                                ),
-                                "strategy_win_rate_pct": float(
-                                    single_stats.get("strategy_win_rate_pct", 0.0)
-                                ),
-                                "max_drawdown_pct": float(
-                                    single_stats.get("max_drawdown_pct", 0.0)
-                                ),
-                                "final_net_value": float(
-                                    single_stats.get("final_net_value", 1.0)
-                                ),
-                                "avg_holding_days": float(
-                                    single_stats.get("avg_holding_days", 0.0)
-                                ),
-                                "profit_risk_ratio": float(
-                                    single_stats.get("profit_risk_ratio", 0.0)
-                                ),
-                                "avg_mfe_pct": float(single_stats.get("avg_mfe_pct", 0.0)),
-                                "avg_mae_pct": float(single_stats.get("avg_mae_pct", 0.0)),
-                                "trade_return_volatility_pct": float(
-                                    single_stats.get("trade_return_volatility_pct", 0.0)
-                                ),
-                            }
-                        )
-                    detail_df = (
-                        pd.concat(batch_detail_frames, ignore_index=True)
-                        if batch_detail_frames
-                        else pd.DataFrame()
-                    )
-                    daily_df = (
-                        pd.concat(batch_daily_frames, ignore_index=True)
-                        if batch_daily_frames
-                        else pd.DataFrame()
-                    )
-                    equity_df = (
-                        pd.concat(batch_equity_frames, ignore_index=True)
-                        if batch_equity_frames
-                        else pd.DataFrame()
-                    )
-                    per_stock_stats_df = pd.DataFrame(batch_rows)
-                    if per_stock_stats_df.empty:
-                        stats = {}
-                    else:
-                        stats = {
-                            "total_return_pct": float(
-                                per_stock_stats_df["total_return_pct"].mean()
-                            ),
-                            "strategy_win_rate_pct": float(
-                                per_stock_stats_df["strategy_win_rate_pct"].mean()
-                            ),
-                            "max_drawdown_pct": float(
-                                per_stock_stats_df["max_drawdown_pct"].mean()
-                            ),
-                            "executed_trades": int(
-                                per_stock_stats_df["executed_trades"].sum()
-                            ),
-                            "signal_count": int(per_stock_stats_df["signal_count"].sum()),
-                        }
-                elif params.scan_config.enabled:
-                    (
-                        scan_df,
-                        detail_df,
-                        daily_df,
-                        equity_df,
-                        stats,
-                        best_scan_overrides,
-                    ) = run_parameter_scan(all_data, params)
-                else:
-                    detail_df, daily_df, equity_df, stats = analyze_all_stocks(
-                        all_data, params
-                    )
+                result_bundle = run_backtest(
+                    all_data,
+                    params,
+                    batch_mode="per_stock" if is_batch_per_stock_mode else "combined",
+                )
+                detail_df = result_bundle.detail_df
+                daily_df = result_bundle.daily_df
+                equity_df = result_bundle.equity_df
+                stats = result_bundle.stats
+                scan_df = result_bundle.scan_df
+                best_scan_overrides = result_bundle.best_scan_overrides
+                per_stock_stats_df = result_bundle.per_stock_stats_df
                 excel_bytes = export_to_excel_bytes(
                     detail_df, daily_df, equity_df, scan_df=scan_df
                 )
-                trade_behavior_df = build_trade_behavior_overview(detail_df)
-                drawdown_episodes_df, drawdown_contributors_df = (
-                    build_drawdown_diagnostics(equity_df, detail_df)
-                )
-                anomaly_queue_df = build_trade_anomaly_queue(detail_df, params)
+                trade_behavior_df = result_bundle.trade_behavior_df
+                drawdown_episodes_df = result_bundle.drawdown_episodes_df
+                drawdown_contributors_df = result_bundle.drawdown_contributors_df
+                anomaly_queue_df = result_bundle.anomaly_queue_df
             st.success("回测完成")
             st.session_state["detail_df"] = detail_df
             st.session_state["daily_df"] = daily_df
@@ -3660,9 +3497,7 @@ if submitted:
             ]
             st.session_state["best_scan_overrides"] = best_scan_overrides
             st.session_state["per_stock_stats_df"] = per_stock_stats_df
-            st.session_state["batch_backtest_mode"] = (
-                "per_stock" if is_batch_per_stock_mode else "combined"
-            )
+            st.session_state["batch_backtest_mode"] = result_bundle.batch_backtest_mode
             st.session_state["excel_bytes"] = excel_bytes
             st.session_state["download_name"] = build_download_name(
                 params.start_date, params.end_date
@@ -3807,7 +3642,9 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
             st.info("暂无资金曲线数据")
 
     with tab_diagnostics:
-        section_header("交易诊断", "将交易行为、回撤诊断与异常队列集中展示，便于排查与复盘。")
+        section_header(
+            "交易诊断", "将交易行为、回撤诊断与异常队列集中展示，便于排查与复盘。"
+        )
         symbol_name_map = load_symbol_name_map()
         if isinstance(trade_behavior_df, pd.DataFrame) and not trade_behavior_df.empty:
             st.markdown("**交易行为总览**")
@@ -3877,7 +3714,9 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
                 with dd_cols[1]:
                     st.caption("最大回撤段内的开仓原因贡献分布")
                     dataframe_stretch(
-                        format_drawdown_contributors_for_display(drawdown_contributors_df),
+                        format_drawdown_contributors_for_display(
+                            drawdown_contributors_df
+                        ),
                         hide_index=True,
                         column_config=build_drawdown_contributor_column_config(),
                         height=240,
@@ -3913,8 +3752,13 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
             )
         if (
             (not isinstance(trade_behavior_df, pd.DataFrame) or trade_behavior_df.empty)
-            and (not isinstance(drawdown_episodes_df, pd.DataFrame) or drawdown_episodes_df.empty)
-            and (not isinstance(anomaly_queue_df, pd.DataFrame) or anomaly_queue_df.empty)
+            and (
+                not isinstance(drawdown_episodes_df, pd.DataFrame)
+                or drawdown_episodes_df.empty
+            )
+            and (
+                not isinstance(anomaly_queue_df, pd.DataFrame) or anomaly_queue_df.empty
+            )
         ):
             st.info("暂无诊断数据")
 

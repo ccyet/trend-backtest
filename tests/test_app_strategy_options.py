@@ -25,9 +25,26 @@ def test_app_exposes_new_strategy_modes_and_intraday_timeframe_support() -> None
     assert update_timeframe.options == ["1d", "30m", "15m", "5m"]
     assert update_timeframe.value == ["1d"]
 
+    update_provider_1d = app.selectbox(key="offline_update_provider_1d")
+    assert update_provider_1d.options == ["AKShare 在线", "通达信 TDX"]
+    assert update_provider_1d.value == "akshare"
+
+    app.multiselect(key="offline_update_timeframe").set_value(["1d", "30m", "15m"])
+    app.run()
+    update_provider_30m = app.selectbox(key="offline_update_provider_30m")
+    update_provider_15m = app.selectbox(key="offline_update_provider_15m")
+    assert update_provider_30m.options == ["AKShare 在线", "通达信 TDX"]
+    assert update_provider_15m.options == ["AKShare 在线", "通达信 TDX"]
+
     captions = [caption.value for caption in app.caption]
-    assert "1d 为常规日线；early_surge_high_base 使用 30m 形态并自动切换到 5m 执行。" in captions
-    assert "分钟级数据已支持 30m / 15m / 5m 更新；当前策略执行与展示仍以现有模型约束为主。" in captions
+    assert (
+        "1d 为常规日线；early_surge_high_base 使用 30m 形态并自动切换到 5m 执行。"
+        in captions
+    )
+    assert (
+        "当前支持按周期分别选择 AKShare / TDX 更新源；当前更新链路已覆盖 1d / 30m / 15m / 5m。"
+        in captions
+    )
 
 
 def test_app_updates_direction_options_for_acceleration_mode() -> None:
@@ -90,7 +107,13 @@ def test_app_exposes_atr_filter_and_trailing_controls() -> None:
 
     scan_axis_1 = app.selectbox(key="scan_axis_1_field")
     scan_axis_2 = app.selectbox(key="scan_axis_2_field")
-    for option in ["ATR过滤周期", "最小ATR波动过滤", "最大ATR波动过滤", "ATR跟踪周期", "ATR跟踪倍数"]:
+    for option in [
+        "ATR过滤周期",
+        "最小ATR波动过滤",
+        "最大ATR波动过滤",
+        "ATR跟踪周期",
+        "ATR跟踪倍数",
+    ]:
         assert option in scan_axis_1.options
         assert option in scan_axis_2.options
 
@@ -298,6 +321,8 @@ def test_app_passes_tdx_tqcenter_path_to_update_subprocess(
     app.session_state["tdx_tqcenter_path"] = install_root
     app.session_state["tdx_tqcenter_path_display"] = install_root
     app.multiselect(key="offline_update_timeframe").set_value(["1d", "30m"])
+    app.run()
+    app.selectbox(key="offline_update_provider_1d").set_value("tdx")
 
     app.button(key="offline_update_submit").click()
     app.run()
@@ -316,6 +341,12 @@ def test_app_passes_tdx_tqcenter_path_to_update_subprocess(
         if token == "--timeframe" and index + 1 < len(cmd)
     ]
     assert timeframe_values == ["1d", "30m"]
+    provider_values = [
+        cmd[index + 1]
+        for index, token in enumerate(cmd)
+        if token == "--provider" and index + 1 < len(cmd)
+    ]
+    assert provider_values == ["1d=tdx", "30m=akshare"]
 
 
 def test_app_passes_tdx_tqcenter_path_to_indicator_import_subprocess(
@@ -360,10 +391,15 @@ def test_app_passes_tdx_tqcenter_path_to_indicator_import_subprocess(
     assert "--indicator" in cmd and "board_ma" in cmd
 
 
-def test_app_indicator_probe_shows_manual_fallback_message(monkeypatch, tmp_path: Path) -> None:
+def test_app_indicator_probe_shows_manual_fallback_message(
+    monkeypatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(
         "app.probe_local_indicator_candidates",
-        lambda path: ([('board_ma', '板块均线')], '当前未发现通达信提供稳定的本地公式枚举接口，已展示系统内置支持项；若未命中，请手动输入公式名称和输出标识符。'),
+        lambda path: (
+            [("board_ma", "板块均线")],
+            "当前未发现通达信提供稳定的本地公式枚举接口，已展示系统内置支持项；若未命中，请手动输入公式名称和输出标识符。",
+        ),
     )
 
     app = AppTest.from_file("app.py", default_timeout=10)
@@ -376,7 +412,9 @@ def test_app_indicator_probe_shows_manual_fallback_message(monkeypatch, tmp_path
     assert any("未发现通达信提供稳定的本地公式枚举接口" in item for item in infos)
 
 
-def test_app_passes_manual_formula_mapping_to_indicator_import(monkeypatch, tmp_path: Path) -> None:
+def test_app_passes_manual_formula_mapping_to_indicator_import(
+    monkeypatch, tmp_path: Path
+) -> None:
     captured: dict[str, object] = {}
 
     class _FakeResult:
@@ -506,14 +544,22 @@ def test_app_curve_caption_mentions_legend_when_grouped_traces_are_available() -
                     pd.Timestamp("2024-01-02"),
                 ],
                 "net_value": [1.0, 1.1, 1.0, 0.95],
-                "batch_stock_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],
+                "batch_stock_code": [
+                    "000001.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000002.SZ",
+                ],
             }
         ),
     )
     app.run()
 
     captions = [caption.value for caption in app.caption]
-    assert "逐股独立回测时，图例会按标的区分各条净值曲线；下表保留原始净值序列，适合与图形交叉核对。" in captions
+    assert (
+        "逐股独立回测时，图例会按标的区分各条净值曲线；下表保留原始净值序列，适合与图形交叉核对。"
+        in captions
+    )
 
     plotly_proto = str(app.get("plotly_chart")[0].proto)
     assert "000001.SZ" in plotly_proto
@@ -539,4 +585,7 @@ def test_app_curve_caption_falls_back_when_per_stock_mode_has_no_batch_labels() 
 
     captions = [caption.value for caption in app.caption]
     assert "下表保留原始净值序列，适合与图形交叉核对。" in captions
-    assert "逐股独立回测时，图例会按标的区分各条净值曲线；下表保留原始净值序列，适合与图形交叉核对。" not in captions
+    assert (
+        "逐股独立回测时，图例会按标的区分各条净值曲线；下表保留原始净值序列，适合与图形交叉核对。"
+        not in captions
+    )
