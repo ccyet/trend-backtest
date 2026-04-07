@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass, replace
 from itertools import product
 import json
 from typing import Any, Callable, cast
@@ -142,6 +143,28 @@ ANOMALY_QUEUE_COLUMNS = [
 ]
 
 
+@dataclass(frozen=True)
+class BacktestResultBundle:
+    detail_df: pd.DataFrame
+    daily_df: pd.DataFrame
+    equity_df: pd.DataFrame
+    trade_behavior_df: pd.DataFrame
+    drawdown_episodes_df: pd.DataFrame
+    drawdown_contributors_df: pd.DataFrame
+    anomaly_queue_df: pd.DataFrame
+    stats: dict[str, float]
+    scan_df: pd.DataFrame
+    best_scan_overrides: dict[str, int | float]
+    per_stock_stats_df: pd.DataFrame
+    batch_backtest_mode: str
+
+
+@dataclass(frozen=True)
+class ScanExecutionContext:
+    grouped_stock_frames: tuple[pd.DataFrame, ...]
+    execution_by_code: dict[str, pd.DataFrame]
+
+
 def _empty_scan_stats() -> dict[str, int]:
     return {
         "signal_count": 0,
@@ -215,18 +238,19 @@ def _breakout_volume_ratio(
     return float(trigger_volume) / float(baseline)
 
 
-def scan_trade_candidates(
-    all_data: pd.DataFrame, params: AnalysisParams
-) -> tuple[pd.DataFrame, dict[str, int]]:
+def _build_grouped_stock_frames(all_data: pd.DataFrame) -> tuple[pd.DataFrame, ...]:
     if all_data.empty:
-        return pd.DataFrame(columns=pd.Index(BASE_DETAIL_COLUMNS)), _empty_scan_stats()
+        return ()
+    return tuple(
+        stock_df.sort_values("date").reset_index(drop=True).copy()
+        for _, stock_df in all_data.groupby("stock_code", sort=True)
+    )
 
-    start_ts, end_ts = _signal_window(params)
 
-    detail_records: list[dict[str, Any]] = []
-    stats = Counter()
-
-    execution_data: pd.DataFrame | None = None
+def _build_scan_execution_context(
+    all_data: pd.DataFrame, params: AnalysisParams
+) -> ScanExecutionContext:
+    grouped_stock_frames = _build_grouped_stock_frames(all_data)
     execution_by_code: dict[str, pd.DataFrame] = {}
     if params.entry_factor == ESHB_ENTRY_FACTOR:
         execution_data = load_local_parquet_data(
@@ -243,8 +267,25 @@ def scan_trade_candidates(
             execution_by_code[str(stock_code)] = _prepare_execution_frame(
                 stock_df, params
             )
+    return ScanExecutionContext(
+        grouped_stock_frames=grouped_stock_frames,
+        execution_by_code=execution_by_code,
+    )
 
-    for _, stock_df in all_data.groupby("stock_code", sort=True):
+
+def _scan_trade_candidates_with_context(
+    params: AnalysisParams,
+    context: ScanExecutionContext,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    if not context.grouped_stock_frames:
+        return pd.DataFrame(columns=pd.Index(BASE_DETAIL_COLUMNS)), _empty_scan_stats()
+
+    start_ts, end_ts = _signal_window(params)
+
+    detail_records: list[dict[str, Any]] = []
+    stats = Counter()
+
+    for stock_df in context.grouped_stock_frames:
         enriched = apply_gap_filters(stock_df, params)
         signal_mask = enriched["is_signal"] & enriched["date"].between(start_ts, end_ts)
         signal_indices = enriched.index[signal_mask].tolist()
@@ -255,7 +296,7 @@ def scan_trade_candidates(
             if params.entry_factor == ESHB_ENTRY_FACTOR:
                 setup_row = enriched.iloc[signal_idx]
                 stock_code = str(setup_row["stock_code"])
-                execution_df = execution_by_code.get(stock_code)
+                execution_df = context.execution_by_code.get(stock_code)
                 if execution_df is None or execution_df.empty:
                     stats["skipped_no_exit"] += 1
                     continue
@@ -339,6 +380,14 @@ def scan_trade_candidates(
         drop=True
     )
     return detail_df, {**_empty_scan_stats(), **dict(stats)}
+
+
+def scan_trade_candidates(
+    all_data: pd.DataFrame, params: AnalysisParams
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    return _scan_trade_candidates_with_context(
+        params, _build_scan_execution_context(all_data, params)
+    )
 
 
 def build_strategy_trades(
@@ -576,7 +625,26 @@ def analyze_all_stocks(
     all_data: pd.DataFrame,
     params: AnalysisParams,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    candidate_df, scan_stats = scan_trade_candidates(all_data, params)
+    candidate_df, scan_stats = _scan_trade_candidates_with_context(
+        params, _build_scan_execution_context(all_data, params)
+    )
+    strategy_df, strategy_stats = build_strategy_trades(candidate_df)
+    daily_df = build_daily_summary(strategy_df)
+    equity_df = build_equity_curve(all_data, strategy_df, params)
+
+    if not equity_df.empty:
+        strategy_stats["max_drawdown_pct"] = abs(float(equity_df["drawdown_pct"].min()))
+
+    combined_stats: dict[str, float] = {**scan_stats, **strategy_stats}
+    return strategy_df, daily_df, equity_df, combined_stats
+
+
+def _analyze_all_stocks_with_context(
+    all_data: pd.DataFrame,
+    params: AnalysisParams,
+    context: ScanExecutionContext,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    candidate_df, scan_stats = _scan_trade_candidates_with_context(params, context)
     strategy_df, strategy_stats = build_strategy_trades(candidate_df)
     daily_df = build_daily_summary(strategy_df)
     equity_df = build_equity_curve(all_data, strategy_df, params)
@@ -623,6 +691,7 @@ def run_parameter_scan(
         "trade_return_volatility_pct",
         "avg_holding_days",
     }
+    scan_context = _build_scan_execution_context(all_data, params)
 
     for scan_id, combo in enumerate(value_product, start=1):
         overrides = {
@@ -630,8 +699,8 @@ def run_parameter_scan(
             for field_name, value in zip(field_names, combo, strict=True)
         }
         scan_params = apply_scan_overrides(params, overrides)
-        detail_df, daily_df, equity_df, stats = analyze_all_stocks(
-            all_data, scan_params
+        detail_df, daily_df, equity_df, stats = _analyze_all_stocks_with_context(
+            all_data, scan_params, scan_context
         )
         metric_value = float(stats.get(scan_config.metric, 0.0))
         row: dict[str, int | float] = {"scan_id": scan_id, **overrides}
@@ -1085,3 +1154,173 @@ def build_trade_anomaly_queue(
         .reset_index(drop=True)
     )
     return anomaly_df.loc[:, ANOMALY_QUEUE_COLUMNS]
+
+
+def _finalize_result_bundle(
+    *,
+    detail_df: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    equity_df: pd.DataFrame,
+    stats: dict[str, float],
+    params: AnalysisParams,
+    scan_df: pd.DataFrame | None = None,
+    best_scan_overrides: dict[str, int | float] | None = None,
+    per_stock_stats_df: pd.DataFrame | None = None,
+    batch_backtest_mode: str = "combined",
+) -> BacktestResultBundle:
+    trade_behavior_df = build_trade_behavior_overview(detail_df)
+    drawdown_episodes_df, drawdown_contributors_df = build_drawdown_diagnostics(
+        equity_df, detail_df
+    )
+    anomaly_queue_df = build_trade_anomaly_queue(detail_df, params)
+    return BacktestResultBundle(
+        detail_df=detail_df,
+        daily_df=daily_df,
+        equity_df=equity_df,
+        trade_behavior_df=trade_behavior_df,
+        drawdown_episodes_df=drawdown_episodes_df,
+        drawdown_contributors_df=drawdown_contributors_df,
+        anomaly_queue_df=anomaly_queue_df,
+        stats=stats,
+        scan_df=scan_df if scan_df is not None else pd.DataFrame(),
+        best_scan_overrides=best_scan_overrides or {},
+        per_stock_stats_df=per_stock_stats_df
+        if per_stock_stats_df is not None
+        else pd.DataFrame(),
+        batch_backtest_mode=batch_backtest_mode,
+    )
+
+
+def _run_combined_backtest(
+    all_data: pd.DataFrame, params: AnalysisParams
+) -> BacktestResultBundle:
+    detail_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
+    return _finalize_result_bundle(
+        detail_df=detail_df,
+        daily_df=daily_df,
+        equity_df=equity_df,
+        stats=stats,
+        params=params,
+    )
+
+
+def _run_scan_backtest(
+    all_data: pd.DataFrame, params: AnalysisParams
+) -> BacktestResultBundle:
+    scan_df, detail_df, daily_df, equity_df, stats, best_scan_overrides = (
+        run_parameter_scan(all_data, params)
+    )
+    return _finalize_result_bundle(
+        detail_df=detail_df,
+        daily_df=daily_df,
+        equity_df=equity_df,
+        stats=stats,
+        params=params,
+        scan_df=scan_df,
+        best_scan_overrides=best_scan_overrides,
+    )
+
+
+def _run_per_stock_backtest(
+    all_data: pd.DataFrame, params: AnalysisParams
+) -> BacktestResultBundle:
+    batch_detail_frames: list[pd.DataFrame] = []
+    batch_daily_frames: list[pd.DataFrame] = []
+    batch_equity_frames: list[pd.DataFrame] = []
+    batch_rows: list[dict[str, Any]] = []
+
+    for stock_code in params.stock_codes:
+        single_params = replace(
+            params,
+            stock_codes=(stock_code,),
+            scan_config=replace(params.scan_config, enabled=False, axes=()),
+        )
+        stock_data = all_data.loc[
+            all_data["stock_code"].astype(str) == str(stock_code)
+        ].copy()
+        single_detail_df, single_daily_df, single_equity_df, single_stats = (
+            analyze_all_stocks(stock_data, single_params)
+        )
+        if not single_detail_df.empty:
+            single_detail_df = single_detail_df.copy()
+            single_detail_df["batch_stock_code"] = stock_code
+            batch_detail_frames.append(single_detail_df)
+        if not single_daily_df.empty:
+            single_daily_df = single_daily_df.copy()
+            single_daily_df["batch_stock_code"] = stock_code
+            batch_daily_frames.append(single_daily_df)
+        if not single_equity_df.empty:
+            single_equity_df = single_equity_df.copy()
+            single_equity_df["batch_stock_code"] = stock_code
+            batch_equity_frames.append(single_equity_df)
+        batch_rows.append(
+            {
+                "stock_code": stock_code,
+                "signal_count": int(single_stats.get("signal_count", 0)),
+                "executed_trades": int(single_stats.get("executed_trades", 0)),
+                "total_return_pct": float(single_stats.get("total_return_pct", 0.0)),
+                "strategy_win_rate_pct": float(
+                    single_stats.get("strategy_win_rate_pct", 0.0)
+                ),
+                "max_drawdown_pct": float(single_stats.get("max_drawdown_pct", 0.0)),
+                "final_net_value": float(single_stats.get("final_net_value", 1.0)),
+                "avg_holding_days": float(single_stats.get("avg_holding_days", 0.0)),
+                "profit_risk_ratio": float(single_stats.get("profit_risk_ratio", 0.0)),
+                "avg_mfe_pct": float(single_stats.get("avg_mfe_pct", 0.0)),
+                "avg_mae_pct": float(single_stats.get("avg_mae_pct", 0.0)),
+                "trade_return_volatility_pct": float(
+                    single_stats.get("trade_return_volatility_pct", 0.0)
+                ),
+            }
+        )
+
+    detail_df = (
+        pd.concat(batch_detail_frames, ignore_index=True)
+        if batch_detail_frames
+        else pd.DataFrame()
+    )
+    daily_df = (
+        pd.concat(batch_daily_frames, ignore_index=True)
+        if batch_daily_frames
+        else pd.DataFrame()
+    )
+    equity_df = (
+        pd.concat(batch_equity_frames, ignore_index=True)
+        if batch_equity_frames
+        else pd.DataFrame()
+    )
+    per_stock_stats_df = pd.DataFrame(batch_rows)
+    if per_stock_stats_df.empty:
+        stats: dict[str, float] = {}
+    else:
+        stats = {
+            "total_return_pct": float(per_stock_stats_df["total_return_pct"].mean()),
+            "strategy_win_rate_pct": float(
+                per_stock_stats_df["strategy_win_rate_pct"].mean()
+            ),
+            "max_drawdown_pct": float(per_stock_stats_df["max_drawdown_pct"].mean()),
+            "executed_trades": float(per_stock_stats_df["executed_trades"].sum()),
+            "signal_count": float(per_stock_stats_df["signal_count"].sum()),
+        }
+
+    return _finalize_result_bundle(
+        detail_df=detail_df,
+        daily_df=daily_df,
+        equity_df=equity_df,
+        stats=stats,
+        params=params,
+        per_stock_stats_df=per_stock_stats_df,
+        batch_backtest_mode="per_stock",
+    )
+
+
+def run_backtest(
+    all_data: pd.DataFrame,
+    params: AnalysisParams,
+    batch_mode: str = "combined",
+) -> BacktestResultBundle:
+    if batch_mode == "per_stock":
+        return _run_per_stock_backtest(all_data, params)
+    if params.scan_config.enabled:
+        return _run_scan_backtest(all_data, params)
+    return _run_combined_backtest(all_data, params)
