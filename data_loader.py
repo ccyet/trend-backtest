@@ -1,24 +1,107 @@
 from __future__ import annotations
 
 from io import BytesIO
+import os
 import re
 import sqlite3
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any, cast
 
 import pandas as pd
 
+from data.providers.tdx_local_indicator_provider import TdxLocalIndicatorProvider
 from data.services.local_inventory_service import list_local_symbols_by_timeframe
 
 
 REQUIRED_COLUMNS = ("date", "stock_code", "open", "high", "low", "close")
 OPTIONAL_COLUMNS = ("volume", "board_ma_ratio_20", "board_ma_ratio_50")
 SUPPORTED_FILE_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
-TIMEFRAME_DIR_NAMES = {"1d": "daily", "30m": "30m", "15m": "15m", "5m": "5m", "1m": "1m"}
+TIMEFRAME_DIR_NAMES = {
+    "1d": "daily",
+    "30m": "30m",
+    "15m": "15m",
+    "5m": "5m",
+    "1m": "1m",
+}
 INDICATOR_DIR_NAMES = {"board_ma": "board_ma"}
+ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = ROOT / "config" / "data_source.yaml"
+DEFAULT_OFFLINE_UPDATE_SOURCES = {
+    "1d": "akshare",
+    "30m": "akshare",
+    "15m": "akshare",
+    "5m": "tdx",
+    "1m": "tdx",
+}
+OFFLINE_UPDATE_SOURCE_KEYS = {
+    timeframe: f"offline_update_source_{timeframe}"
+    for timeframe in DEFAULT_OFFLINE_UPDATE_SOURCES
+}
+SUPPORTED_UPDATE_SOURCES_BY_TIMEFRAME = {
+    "1d": ("akshare", "tdx"),
+    "30m": ("akshare", "tdx"),
+    "15m": ("akshare", "tdx"),
+    "5m": ("akshare", "tdx"),
+    "1m": ("akshare", "tdx"),
+}
+
+
+def read_data_source_config(config_path: Path = CONFIG_PATH) -> dict[str, str]:
+    defaults = {
+        "data_source": "local_parquet",
+        "local_data_root": "data/market/daily",
+        "default_adjust": "qfq",
+    }
+    defaults.update(
+        {
+            OFFLINE_UPDATE_SOURCE_KEYS[timeframe]: source
+            for timeframe, source in DEFAULT_OFFLINE_UPDATE_SOURCES.items()
+        }
+    )
+    if not config_path.exists():
+        return dict(defaults)
+
+    loaded: dict[str, str] = {}
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#") or ":" not in text:
+            continue
+        key, value = text.split(":", 1)
+        loaded[key.strip()] = value.strip().strip("\"'")
+
+    return {key: str(loaded.get(key, value)) for key, value in defaults.items()}
+
+
+def get_supported_update_sources(timeframe: str) -> tuple[str, ...]:
+    return SUPPORTED_UPDATE_SOURCES_BY_TIMEFRAME.get(str(timeframe), ("akshare",))
+
+
+def resolve_offline_update_sources(config: dict[str, str]) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    for timeframe, default_source in DEFAULT_OFFLINE_UPDATE_SOURCES.items():
+        configured = (
+            str(
+                config.get(OFFLINE_UPDATE_SOURCE_KEYS[timeframe], default_source)
+            ).strip()
+            or default_source
+        )
+        supported = get_supported_update_sources(timeframe)
+        resolved[timeframe] = configured if configured in supported else default_source
+    return resolved
+
 
 COLUMN_ALIASES = {
-    "date": ("date", "trade_date", "trading_date", "trade_dt", "日期", "交易日期", "交易日"),
+    "date": (
+        "date",
+        "trade_date",
+        "trading_date",
+        "trade_dt",
+        "日期",
+        "交易日期",
+        "交易日",
+    ),
     "stock_code": (
         "stock_code",
         "ts_code",
@@ -52,13 +135,19 @@ def parse_trade_dates(series: pd.Series, *, normalize_to_day: bool = True) -> pd
 
     raw = series.astype(str).str.strip()
     parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
-    numeric_values = pd.Series(pd.to_numeric(series, errors="coerce"), index=series.index)
+    numeric_values = pd.Series(
+        pd.to_numeric(series, errors="coerce"), index=series.index
+    )
 
     compact_mask = raw.str.fullmatch(r"\d{8}")
     if compact_mask.any():
-        parsed.loc[compact_mask] = pd.to_datetime(raw.loc[compact_mask], format="%Y%m%d", errors="coerce")
+        parsed.loc[compact_mask] = pd.to_datetime(
+            raw.loc[compact_mask], format="%Y%m%d", errors="coerce"
+        )
 
-    excel_serial_mask = parsed.isna() & numeric_values.notna() & numeric_values.between(20_000, 80_000)
+    excel_serial_mask = (
+        parsed.isna() & numeric_values.notna() & numeric_values.between(20_000, 80_000)
+    )
     if excel_serial_mask.any():
         parsed.loc[excel_serial_mask] = pd.to_datetime(
             numeric_values.loc[excel_serial_mask],
@@ -67,7 +156,11 @@ def parse_trade_dates(series: pd.Series, *, normalize_to_day: bool = True) -> pd
             errors="coerce",
         )
 
-    unix_seconds_mask = parsed.isna() & numeric_values.notna() & numeric_values.abs().between(1_000_000_000, 9_999_999_999)
+    unix_seconds_mask = (
+        parsed.isna()
+        & numeric_values.notna()
+        & numeric_values.abs().between(1_000_000_000, 9_999_999_999)
+    )
     if unix_seconds_mask.any():
         parsed.loc[unix_seconds_mask] = pd.to_datetime(
             numeric_values.loc[unix_seconds_mask],
@@ -75,8 +168,10 @@ def parse_trade_dates(series: pd.Series, *, normalize_to_day: bool = True) -> pd
             errors="coerce",
         )
 
-    unix_milliseconds_mask = parsed.isna() & numeric_values.notna() & numeric_values.abs().between(
-        1_000_000_000_000, 9_999_999_999_999
+    unix_milliseconds_mask = (
+        parsed.isna()
+        & numeric_values.notna()
+        & numeric_values.abs().between(1_000_000_000_000, 9_999_999_999_999)
     )
     if unix_milliseconds_mask.any():
         parsed.loc[unix_milliseconds_mask] = pd.to_datetime(
@@ -87,7 +182,9 @@ def parse_trade_dates(series: pd.Series, *, normalize_to_day: bool = True) -> pd
 
     remaining_mask = parsed.isna()
     if remaining_mask.any():
-        parsed.loc[remaining_mask] = pd.to_datetime(raw.loc[remaining_mask], errors="coerce")
+        parsed.loc[remaining_mask] = pd.to_datetime(
+            raw.loc[remaining_mask], errors="coerce"
+        )
 
     return parsed.dt.normalize() if normalize_to_day else parsed
 
@@ -145,6 +242,157 @@ def resolve_local_data_root(local_data_root: str, timeframe: str = "1d") -> Path
     return root
 
 
+def normalize_tdx_tqcenter_path(path_text: str) -> str:
+    cleaned = path_text.strip().strip('"')
+    if not cleaned:
+        return ""
+
+    candidate = Path(cleaned).expanduser()
+    if candidate.name.lower() == "tqcenter.py":
+        return str(candidate.parent)
+    if (
+        candidate.name.lower() == "user"
+        and candidate.parent.name.lower() == "pyplugins"
+    ):
+        return str(candidate)
+    if candidate.name.lower() == "pyplugins":
+        return str(candidate / "user")
+    if (candidate / "tqcenter.py").exists():
+        return str(candidate)
+    return str(candidate / "PYPlugins" / "user")
+
+
+def _build_subprocess_env(tdx_tqcenter_path: str) -> dict[str, str] | None:
+    normalized_tqcenter_path = normalize_tdx_tqcenter_path(tdx_tqcenter_path)
+    if not normalized_tqcenter_path:
+        return None
+
+    env = dict(os.environ)
+    env["TDX_TQCENTER_PATH"] = normalized_tqcenter_path
+    return env
+
+
+def run_local_data_update(
+    symbols_text: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+    timeframes: list[str],
+    refresh_symbols: bool,
+    export_excel: bool,
+    provider_overrides: dict[str, str] | None = None,
+    tdx_tqcenter_path: str = "",
+) -> tuple[bool, str]:
+    cmd = [
+        sys.executable,
+        "scripts/update_data.py",
+        "--start-date",
+        start_date,
+        "--end-date",
+        end_date,
+    ]
+    if adjust:
+        cmd.extend(["--adjust", adjust])
+
+    normalized_timeframes = [
+        str(item).strip() for item in timeframes if str(item).strip()
+    ]
+    if not normalized_timeframes:
+        normalized_timeframes = ["1d"]
+
+    deduped_timeframes: list[str] = []
+    seen_timeframes: set[str] = set()
+    for timeframe in normalized_timeframes:
+        if timeframe in seen_timeframes:
+            continue
+        seen_timeframes.add(timeframe)
+        deduped_timeframes.append(timeframe)
+
+    for timeframe in deduped_timeframes:
+        cmd.extend(["--timeframe", timeframe])
+    resolved_provider_overrides = provider_overrides or {}
+    for timeframe in deduped_timeframes:
+        provider = str(resolved_provider_overrides.get(timeframe, "")).strip()
+        if provider:
+            cmd.extend(["--provider", f"{timeframe}={provider}"])
+    if symbols_text.strip():
+        cmd.extend(["--symbols", symbols_text.strip()])
+    if refresh_symbols:
+        cmd.append("--refresh-symbols")
+    if export_excel:
+        cmd.append("--export-excel")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=_build_subprocess_env(tdx_tqcenter_path),
+    )
+    output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    return result.returncode == 0, output.strip()
+
+
+def run_local_indicator_import(
+    *,
+    indicator_key: str,
+    symbols_text: str,
+    start_date: str,
+    end_date: str,
+    adjust: str,
+    formula_name: str = "",
+    output_map_text: str = "",
+    tdx_tqcenter_path: str = "",
+) -> tuple[bool, str]:
+    normalized_symbols = symbols_text.strip()
+    if not normalized_symbols:
+        return False, "请先输入要导入指标的股票代码。"
+
+    cmd = [
+        sys.executable,
+        "scripts/import_tdx_local_indicators.py",
+        "--indicator",
+        indicator_key,
+        "--symbols",
+        normalized_symbols,
+        "--start-date",
+        start_date,
+        "--end-date",
+        end_date,
+        "--adjust",
+        adjust,
+    ]
+    if formula_name.strip():
+        cmd.extend(["--formula-name", formula_name.strip()])
+    if output_map_text.strip():
+        cmd.extend(["--output-map", output_map_text.strip()])
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=_build_subprocess_env(tdx_tqcenter_path),
+    )
+    output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    return result.returncode == 0, output.strip()
+
+
+def probe_local_indicator_candidates(
+    tdx_tqcenter_path: str,
+) -> tuple[list[tuple[str, str]], str]:
+    specs, message = TdxLocalIndicatorProvider.discover_indicator_candidates(
+        tdx_tqcenter_path
+    )
+    return [(spec.key, spec.display_name) for spec in specs], message
+
+
+def build_export_dir_hint(timeframe: str, adjust: str) -> str:
+    return (
+        f"data/market/exports/{adjust}/"
+        if timeframe == "1d"
+        else f"data/market/exports/{timeframe}/{adjust}/"
+    )
+
+
 def _load_local_indicator_frame(
     indicator_key: str,
     stock_codes: tuple[str, ...] | None,
@@ -155,16 +403,34 @@ def _load_local_indicator_frame(
     indicator_dir_name = INDICATOR_DIR_NAMES.get(indicator_key, indicator_key)
     indicator_dir = Path(indicator_root) / indicator_dir_name
     if not indicator_dir.exists():
-        return pd.DataFrame(columns=pd.Index(["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]))
+        return pd.DataFrame(
+            columns=pd.Index(
+                ["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]
+            )
+        )
 
-    normalized_codes = tuple(code.strip().upper() for code in (stock_codes or ()) if code.strip())
-    symbols = list(normalized_codes) if normalized_codes else sorted(path.stem.upper() for path in indicator_dir.glob("*.parquet"))
+    normalized_codes = tuple(
+        code.strip().upper() for code in (stock_codes or ()) if code.strip()
+    )
+    symbols = (
+        list(normalized_codes)
+        if normalized_codes
+        else sorted(path.stem.upper() for path in indicator_dir.glob("*.parquet"))
+    )
     if not symbols:
-        return pd.DataFrame(columns=pd.Index(["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]))
+        return pd.DataFrame(
+            columns=pd.Index(
+                ["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]
+            )
+        )
 
     frames: list[pd.DataFrame] = []
     start_ts = cast(pd.Timestamp, pd.to_datetime(start_date)).normalize()
-    end_ts = cast(pd.Timestamp, pd.to_datetime(end_date)).normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    end_ts = (
+        cast(pd.Timestamp, pd.to_datetime(end_date)).normalize()
+        + pd.Timedelta(days=1)
+        - pd.Timedelta(nanoseconds=1)
+    )
     for symbol in symbols:
         file_path = indicator_dir / f"{symbol}.parquet"
         if not file_path.exists():
@@ -180,7 +446,11 @@ def _load_local_indicator_frame(
         frames.append(frame)
 
     if not frames:
-        return pd.DataFrame(columns=pd.Index(["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]))
+        return pd.DataFrame(
+            columns=pd.Index(
+                ["date", "stock_code", "board_ma_ratio_20", "board_ma_ratio_50"]
+            )
+        )
     return cast(pd.DataFrame, pd.concat(frames, ignore_index=True))
 
 
@@ -197,7 +467,9 @@ def _normalize_loaded_data(
     if df.empty:
         return pd.DataFrame(columns=pd.Index(REQUIRED_COLUMNS + OPTIONAL_COLUMNS))
 
-    renamed = df.rename(columns={actual: canonical for canonical, actual in column_map.items()}).copy()
+    renamed = df.rename(
+        columns={actual: canonical for canonical, actual in column_map.items()}
+    ).copy()
     for column in REQUIRED_COLUMNS + OPTIONAL_COLUMNS:
         if column not in renamed.columns:
             renamed[column] = pd.NA
@@ -207,20 +479,43 @@ def _normalize_loaded_data(
         cast(pd.Series, normalized["date"]),
         normalize_to_day=normalize_to_day,
     )
-    for column in ("open", "high", "low", "close", "volume", "board_ma_ratio_20", "board_ma_ratio_50"):
+    for column in (
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "board_ma_ratio_20",
+        "board_ma_ratio_50",
+    ):
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
 
-    normalized["stock_code"] = cast(pd.Series, normalized["stock_code"]).astype(str).str.strip().str.upper()
-    required_mask = cast(pd.DataFrame, normalized[["date", "stock_code", "open", "high", "low", "close"]]).notna().all(axis=1)
+    normalized["stock_code"] = (
+        cast(pd.Series, normalized["stock_code"]).astype(str).str.strip().str.upper()
+    )
+    required_mask = (
+        cast(
+            pd.DataFrame,
+            normalized[["date", "stock_code", "open", "high", "low", "close"]],
+        )
+        .notna()
+        .all(axis=1)
+    )
     normalized = normalized.loc[required_mask]
 
-    query_start, query_end = _calculate_query_window(start_date, end_date, lookback_days, lookahead_days)
+    query_start, query_end = _calculate_query_window(
+        start_date, end_date, lookback_days, lookahead_days
+    )
     query_start_ts = query_start.normalize()
-    query_end_ts = query_end.normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    query_end_ts = (
+        query_end.normalize() + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    )
     mask = (normalized["date"] >= query_start_ts) & (normalized["date"] <= query_end_ts)
     normalized = normalized.loc[mask]
 
-    normalized_codes = tuple(code.strip().upper() for code in (stock_codes or ()) if code.strip())
+    normalized_codes = tuple(
+        code.strip().upper() for code in (stock_codes or ()) if code.strip()
+    )
     if normalized_codes:
         normalized = normalized.loc[normalized["stock_code"].isin(normalized_codes)]
 
@@ -281,13 +576,15 @@ def describe_tables(db_path: str) -> list[dict[str, Any]]:
             columns = [str(row[1]) for row in rows]
             mapping = _resolve_columns(conn, table)
             detected_fields = ", ".join(
-                f"{canonical}->{actual}" for canonical, actual in sorted((mapping or {}).items())
+                f"{canonical}->{actual}"
+                for canonical, actual in sorted((mapping or {}).items())
             )
             overviews.append(
                 {
                     "table_name": table,
                     "column_count": len(columns),
-                    "columns_preview": ", ".join(columns[:8]) + (" ..." if len(columns) > 8 else ""),
+                    "columns_preview": ", ".join(columns[:8])
+                    + (" ..." if len(columns) > 8 else ""),
                     "auto_detected": "是" if mapping else "否",
                     "detected_fields": detected_fields,
                 }
@@ -347,7 +644,9 @@ def list_file_sheets(
     file_bytes: bytes | None = None,
     file_name: str | None = None,
 ) -> list[str]:
-    source, display_name = _build_file_source(file_path=file_path, file_bytes=file_bytes, file_name=file_name)
+    source, display_name = _build_file_source(
+        file_path=file_path, file_bytes=file_bytes, file_name=file_name
+    )
     suffix = _normalize_file_suffix(display_name)
     if suffix == ".csv":
         return []
@@ -363,7 +662,9 @@ def describe_file_source(
     sheet_name: str | None = None,
     column_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    source, display_name = _build_file_source(file_path=file_path, file_bytes=file_bytes, file_name=file_name)
+    source, display_name = _build_file_source(
+        file_path=file_path, file_bytes=file_bytes, file_name=file_name
+    )
     suffix = _normalize_file_suffix(display_name)
 
     if suffix == ".csv":
@@ -373,7 +674,9 @@ def describe_file_source(
     else:
         with pd.ExcelFile(source) as workbook:
             sheets = list(workbook.sheet_names)
-            resolved_sheet = sheet_name.strip() if sheet_name and sheet_name.strip() else sheets[0]
+            resolved_sheet = (
+                sheet_name.strip() if sheet_name and sheet_name.strip() else sheets[0]
+            )
             if resolved_sheet not in sheets:
                 raise ValueError(f"工作表 {resolved_sheet} 不存在。")
             preview_df = pd.read_excel(workbook, sheet_name=resolved_sheet)
@@ -386,10 +689,12 @@ def describe_file_source(
         "sheet_names": sheets,
         "selected_sheet": resolved_sheet,
         "column_count": len(preview_columns),
-        "columns_preview": ", ".join(preview_columns[:10]) + (" ..." if len(preview_columns) > 10 else ""),
+        "columns_preview": ", ".join(preview_columns[:10])
+        + (" ..." if len(preview_columns) > 10 else ""),
         "auto_detected": bool(mapping),
         "detected_fields": ", ".join(
-            f"{canonical}->{actual}" for canonical, actual in sorted((mapping or {}).items())
+            f"{canonical}->{actual}"
+            for canonical, actual in sorted((mapping or {}).items())
         ),
     }
 
@@ -406,21 +711,29 @@ def load_file_data(
     lookback_days: int = 0,
     lookahead_days: int = 0,
 ) -> pd.DataFrame:
-    source, display_name = _build_file_source(file_path=file_path, file_bytes=file_bytes, file_name=file_name)
+    source, display_name = _build_file_source(
+        file_path=file_path, file_bytes=file_bytes, file_name=file_name
+    )
     suffix = _normalize_file_suffix(display_name)
 
     if suffix == ".csv":
         raw_df = _read_csv_source(source)
     else:
         with pd.ExcelFile(source) as workbook:
-            target_sheet = sheet_name.strip() if sheet_name and sheet_name.strip() else workbook.sheet_names[0]
+            target_sheet = (
+                sheet_name.strip()
+                if sheet_name and sheet_name.strip()
+                else workbook.sheet_names[0]
+            )
             if target_sheet not in workbook.sheet_names:
                 raise ValueError(f"工作表 {target_sheet} 不存在。")
             raw_df = pd.read_excel(workbook, sheet_name=target_sheet)
 
     column_map = _resolve_frame_columns(raw_df, column_overrides=column_overrides)
     if column_map is None:
-        raise ValueError("文件中没有找到可用的行情字段。请按页面里的数据格式说明整理表头，或填写字段映射。")
+        raise ValueError(
+            "文件中没有找到可用的行情字段。请按页面里的数据格式说明整理表头，或填写字段映射。"
+        )
 
     return _normalize_loaded_data(
         raw_df,
@@ -439,9 +752,13 @@ def _pick_table(
     column_overrides: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, str]]:
     if requested_table:
-        mapping = _resolve_columns(conn, requested_table, column_overrides=column_overrides)
+        mapping = _resolve_columns(
+            conn, requested_table, column_overrides=column_overrides
+        )
         if mapping is None:
-            raise ValueError(f"表 {requested_table} 不存在，或者字段映射与实际字段不匹配。")
+            raise ValueError(
+                f"表 {requested_table} 不存在，或者字段映射与实际字段不匹配。"
+            )
         return requested_table, mapping
 
     candidates = []
@@ -462,7 +779,9 @@ def _pick_table(
     return candidates[0]
 
 
-def _inspect_date_style(conn: sqlite3.Connection, table_name: str, date_column: str) -> str | None:
+def _inspect_date_style(
+    conn: sqlite3.Connection, table_name: str, date_column: str
+) -> str | None:
     query = f"""
         SELECT {quote_ident(date_column)}
         FROM {quote_ident(table_name)}
@@ -483,13 +802,23 @@ def _inspect_date_style(conn: sqlite3.Connection, table_name: str, date_column: 
     return "normalized_text"
 
 
-def _build_date_filter(date_column: str, date_style: str | None) -> tuple[str, str, str]:
+def _build_date_filter(
+    date_column: str, date_style: str | None
+) -> tuple[str, str, str]:
     quoted = quote_ident(date_column)
     if date_style == "compact":
         return f"CAST({quoted} AS TEXT)", "%Y%m%d", "%Y%m%d"
     if date_style == "slash":
-        return f"REPLACE(SUBSTR(CAST({quoted} AS TEXT), 1, 10), '/', '-')", "%Y-%m-%d", "%Y-%m-%d"
-    return f"REPLACE(SUBSTR(CAST({quoted} AS TEXT), 1, 10), '/', '-')", "%Y-%m-%d", "%Y-%m-%d"
+        return (
+            f"REPLACE(SUBSTR(CAST({quoted} AS TEXT), 1, 10), '/', '-')",
+            "%Y-%m-%d",
+            "%Y-%m-%d",
+        )
+    return (
+        f"REPLACE(SUBSTR(CAST({quoted} AS TEXT), 1, 10), '/', '-')",
+        "%Y-%m-%d",
+        "%Y-%m-%d",
+    )
 
 
 def load_stock_data(
@@ -506,12 +835,18 @@ def load_stock_data(
     if not path.exists():
         raise FileNotFoundError(f"找不到数据库文件：{db_path}")
 
-    query_start, query_end = _calculate_query_window(start_date, end_date, lookback_days, lookahead_days)
+    query_start, query_end = _calculate_query_window(
+        start_date, end_date, lookback_days, lookahead_days
+    )
 
     with sqlite3.connect(path) as conn:
-        resolved_table, column_map = _pick_table(conn, table_name, column_overrides=column_overrides)
+        resolved_table, column_map = _pick_table(
+            conn, table_name, column_overrides=column_overrides
+        )
         date_style = _inspect_date_style(conn, resolved_table, column_map["date"])
-        date_expression, sql_start_format, sql_end_format = _build_date_filter(column_map["date"], date_style)
+        date_expression, sql_start_format, sql_end_format = _build_date_filter(
+            column_map["date"], date_style
+        )
 
         select_parts = []
         for canonical in REQUIRED_COLUMNS + OPTIONAL_COLUMNS:
@@ -530,18 +865,26 @@ def load_stock_data(
         params: list[object] = []
 
         filters.append(f"{date_expression} BETWEEN ? AND ?")
-        params.extend([query_start.strftime(sql_start_format), query_end.strftime(sql_end_format)])
+        params.extend(
+            [query_start.strftime(sql_start_format), query_end.strftime(sql_end_format)]
+        )
 
-        normalized_codes = tuple(code.strip().upper() for code in (stock_codes or ()) if code.strip())
+        normalized_codes = tuple(
+            code.strip().upper() for code in (stock_codes or ()) if code.strip()
+        )
         if normalized_codes:
             placeholders = ", ".join("?" for _ in normalized_codes)
-            filters.append(f"UPPER({quote_ident(column_map['stock_code'])}) IN ({placeholders})")
+            filters.append(
+                f"UPPER({quote_ident(column_map['stock_code'])}) IN ({placeholders})"
+            )
             params.extend(normalized_codes)
 
         if filters:
             query.append("WHERE " + " AND ".join(filters))
 
-        query.append(f"ORDER BY {quote_ident(column_map['stock_code'])}, {quote_ident(column_map['date'])}")
+        query.append(
+            f"ORDER BY {quote_ident(column_map['stock_code'])}, {quote_ident(column_map['date'])}"
+        )
         sql = "\n".join(query)
 
         df = pd.read_sql_query(sql, conn, params=params)
@@ -557,10 +900,12 @@ def load_stock_data(
     )
 
 
-
-
-def _list_local_symbols(local_data_root: Path, adjust: str, timeframe: str) -> list[str]:
-    inventory_symbols = list_local_symbols_by_timeframe(timeframe=timeframe, adjust=adjust)
+def _list_local_symbols(
+    local_data_root: Path, adjust: str, timeframe: str
+) -> list[str]:
+    inventory_symbols = list_local_symbols_by_timeframe(
+        timeframe=timeframe, adjust=adjust
+    )
     if inventory_symbols:
         return inventory_symbols
 
@@ -587,8 +932,14 @@ def load_local_parquet_data(
     if not adjust_dir.exists():
         raise FileNotFoundError(f"本地数据目录不存在：{adjust_dir}")
 
-    normalized_codes = tuple(code.strip().upper() for code in (stock_codes or ()) if code.strip())
-    symbols = list(normalized_codes) if normalized_codes else _list_local_symbols(root, adjust, timeframe)
+    normalized_codes = tuple(
+        code.strip().upper() for code in (stock_codes or ()) if code.strip()
+    )
+    symbols = (
+        list(normalized_codes)
+        if normalized_codes
+        else _list_local_symbols(root, adjust, timeframe)
+    )
     if not symbols:
         raise ValueError("本地 parquet 未找到可用股票数据。")
 
@@ -612,7 +963,9 @@ def load_local_parquet_data(
         frames.append(frame)
 
     if normalized_codes and missing_symbols:
-        raise FileNotFoundError(f"以下股票缺少本地 parquet 文件：{', '.join(missing_symbols)}")
+        raise FileNotFoundError(
+            f"以下股票缺少本地 parquet 文件：{', '.join(missing_symbols)}"
+        )
 
     if not frames:
         raise ValueError("本地 parquet 读取结果为空，请检查股票池或日期区间。")
@@ -648,10 +1001,15 @@ def load_local_parquet_data(
         ]
         if overlap_columns:
             normalized = normalized.drop(columns=overlap_columns)
-        indicator_df = indicator_df.drop_duplicates(subset=["stock_code", "date"], keep="last")
-        normalized = normalized.merge(indicator_df, on=["stock_code", "date"], how="left")
+        indicator_df = indicator_df.drop_duplicates(
+            subset=["stock_code", "date"], keep="last"
+        )
+        normalized = normalized.merge(
+            indicator_df, on=["stock_code", "date"], how="left"
+        )
 
     return normalized
+
 
 def load_market_data(
     source_type: str,

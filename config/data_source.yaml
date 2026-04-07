@@ -1,3 +1,8 @@
 data_source: local_parquet
 local_data_root: data/market/daily
 default_adjust: qfq
+offline_update_source_1d: akshare
+offline_update_source_30m: akshare
+offline_update_source_15m: akshare
+offline_update_source_5m: tdx
+offline_update_source_1m: tdx
