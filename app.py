@@ -27,6 +27,11 @@ from data_loader import (
     run_local_data_update,
     run_local_indicator_import,
 )
+from data.services.indicator_catalog_service import (
+    load_registry_manifest,
+    summarize_indicator_availability,
+    summarize_indicator_quality,
+)
 from data.services.local_inventory_service import load_inventory
 from exporter import export_to_excel_bytes
 from models import (
@@ -1746,6 +1751,88 @@ def load_local_inventory_preview(limit: int = 20) -> pd.DataFrame:
     )
 
 
+@st.cache_data(show_spinner=False)
+def load_indicator_registry_preview() -> pd.DataFrame:
+    return load_registry_manifest()
+
+
+@st.cache_data(show_spinner=False)
+def load_indicator_availability_preview(limit: int = 20) -> pd.DataFrame:
+    return summarize_indicator_availability(limit=limit)
+
+
+@st.cache_data(show_spinner=False)
+def load_indicator_quality_preview(limit: int = 20) -> pd.DataFrame:
+    return summarize_indicator_quality(limit=limit)
+
+
+def format_indicator_registry_for_display(preview_df: pd.DataFrame) -> pd.DataFrame:
+    if preview_df.empty:
+        return preview_df
+    display_df = preview_df.copy()
+    bool_columns = ["allow_scan", "allow_filter", "allow_exit"]
+    for column in bool_columns:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(lambda value: "是" if bool(value) else "否")
+    return display_df.rename(
+        columns={
+            "indicator_key": "指标Key",
+            "display_name": "名称",
+            "source_type": "来源",
+            "output_columns": "输出列",
+            "align_rule": "对齐规则",
+            "required_timeframe": "依赖粒度",
+            "lookahead_policy": "Lookahead规则",
+            "allow_scan": "可扫描",
+            "allow_filter": "可过滤",
+            "allow_exit": "可离场",
+            "storage_subdir": "存储目录",
+            "formula_name": "公式名",
+            "description": "说明",
+        }
+    )
+
+
+def format_indicator_availability_for_display(preview_df: pd.DataFrame) -> pd.DataFrame:
+    if preview_df.empty:
+        return preview_df
+    display_df = preview_df.copy()
+    if "updated_at" in display_df.columns:
+        display_df["updated_at"] = pd.to_datetime(display_df["updated_at"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+    for column in ("symbols", "rows"):
+        if column in display_df.columns:
+            display_df[column] = display_df[column].map(lambda value: f"{int(value):,}" if pd.notna(value) else "")
+    return display_df.rename(
+        columns={
+            "indicator_key": "指标Key",
+            "display_name": "名称",
+            "source_type": "来源",
+            "timeframe": "粒度",
+            "adjust": "复权",
+            "symbols": "股票数",
+            "rows": "总行数",
+            "date_range": "覆盖区间",
+            "status": "状态",
+            "updated_at": "更新时间",
+        }
+    )
+
+
+def format_indicator_quality_for_display(preview_df: pd.DataFrame) -> pd.DataFrame:
+    if preview_df.empty:
+        return preview_df
+    return preview_df.rename(
+        columns={
+            "indicator_key": "指标Key",
+            "symbol": "股票",
+            "timeframe": "粒度",
+            "columns_ready": "有效列",
+            "date_range": "覆盖区间",
+            "status": "状态",
+        }
+    )
+
+
 def format_local_inventory_for_display(preview_df: pd.DataFrame) -> pd.DataFrame:
     if preview_df.empty:
         return preview_df
@@ -2186,13 +2273,26 @@ with st.sidebar.expander("数据准备", expanded=False):
     st.caption(
         "当前支持按周期分别选择 AKShare / TDX 更新源；当前更新链路已覆盖 1d / 30m / 15m / 5m。"
     )
-    st.markdown("**通达信本地指标导入**")
-    if st.button("探测通达信本地指标", key="offline_indicator_probe"):
+    st.markdown("**指标管理**")
+    st.caption("按 探测 → 配置 → 导入 → 状态 → 可用性检查 的顺序管理本地指标。")
+    indicator_registry_preview = load_indicator_registry_preview()
+    if not indicator_registry_preview.empty:
+        st.markdown("**指标探测 / 注册表**")
+        dataframe_stretch(
+            format_indicator_registry_for_display(indicator_registry_preview),
+            hide_index=True,
+            height=220,
+        )
+    probe_action_cols = st.columns([1.1, 1])
+    if probe_action_cols[0].button("探测通达信本地指标", key="offline_indicator_probe"):
         candidates, probe_message = probe_local_indicator_candidates(
             str(st.session_state.get("tdx_tqcenter_path", ""))
         )
         st.session_state["offline_indicator_candidates"] = candidates
         st.session_state["offline_indicator_probe_message"] = probe_message
+        load_indicator_registry_preview.clear()
+        load_indicator_availability_preview.clear()
+        load_indicator_quality_preview.clear()
 
     probe_message = str(
         st.session_state.get("offline_indicator_probe_message", "")
@@ -2221,6 +2321,7 @@ with st.sidebar.expander("数据准备", expanded=False):
             index=0,
             key="offline_indicator_adjust",
         )
+        st.caption("当前 registry 已区分 market_native / tdx_formula_local / computed_feature。")
 
     selected_indicator_key = "board_ma"
     manual_formula_name = ""
@@ -2269,6 +2370,26 @@ with st.sidebar.expander("数据准备", expanded=False):
             st.error("本地指标导入失败")
         if output:
             st.code(output)
+        load_indicator_registry_preview.clear()
+        load_indicator_availability_preview.clear()
+        load_indicator_quality_preview.clear()
+
+    indicator_availability_preview = load_indicator_availability_preview(limit=20)
+    if not indicator_availability_preview.empty:
+        st.markdown("**导入状态 / 可用性**")
+        dataframe_stretch(
+            format_indicator_availability_for_display(indicator_availability_preview),
+            hide_index=True,
+            height=240,
+        )
+    indicator_quality_preview = load_indicator_quality_preview(limit=20)
+    if not indicator_quality_preview.empty:
+        st.markdown("**可用性检查**")
+        dataframe_stretch(
+            format_indicator_quality_for_display(indicator_quality_preview),
+            hide_index=True,
+            height=220,
+        )
     preview = load_update_log_preview(limit=20)
     if not preview.empty:
         st.markdown("**最近更新日志**")
