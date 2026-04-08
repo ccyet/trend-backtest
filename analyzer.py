@@ -37,6 +37,7 @@ BASE_DETAIL_COLUMNS = [
     "exit_ma_value",
     "profit_drawdown_ratio",
     "board_ma_value",
+    "imported_indicator_exit_value",
     "fills",
     "fill_count",
     "fill_detail_json",

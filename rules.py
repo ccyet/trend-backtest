@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any, cast
 
 import pandas as pd
 
-from models import EPSILON, AnalysisParams, PartialExitRule, TradeFill
+from models import EPSILON, AnalysisParams, ImportedIndicatorRule, PartialExitRule, TradeFill
 
 
 SIGNAL_COLUMNS = [
@@ -27,6 +27,14 @@ BREAKOUT_ENTRY_FACTORS = frozenset(
 SEQUENCE_ENTRY_FACTORS = frozenset({"candle_run", "candle_run_acceleration"})
 ESHB_ENTRY_FACTOR = "early_surge_high_base"
 BOARD_MA_COLUMNS = {"20": "board_ma_ratio_20", "50": "board_ma_ratio_50"}
+
+
+@dataclass(frozen=True)
+class NumericThresholdRule:
+    column_name: str
+    operator: str
+    threshold: float
+    value_column_name: str
 
 
 def _column(stock_df: pd.DataFrame, column_name: str) -> pd.Series:
@@ -98,6 +106,98 @@ def _compare_board_ma(value: float, operator: str, threshold: float) -> bool:
     return value >= threshold
 
 
+def _compare_threshold(value: float, operator: str, threshold: float) -> bool:
+    if operator == "<=":
+        return value <= threshold
+    return value >= threshold
+
+
+def _apply_numeric_threshold_filter(
+    stock_df: pd.DataFrame,
+    signal_mask: pd.Series,
+    *,
+    column_name: str,
+    operator: str,
+    threshold: float,
+    value_column_name: str,
+) -> pd.Series:
+    if column_name not in stock_df.columns:
+        stock_df[value_column_name] = math.nan
+        return signal_mask & False
+    filter_series = cast(
+        pd.Series, pd.to_numeric(stock_df[column_name], errors="coerce")
+    )
+    stock_df[value_column_name] = filter_series
+    return signal_mask & filter_series.notna() & filter_series.apply(
+        lambda value: _compare_threshold(float(value), operator, threshold)
+        if pd.notna(value)
+        else False
+    )
+
+
+def _resolve_numeric_threshold_exit(
+    day_row: pd.Series,
+    *,
+    column_name: str,
+    operator: str,
+    threshold: float,
+) -> float | None:
+    if column_name not in day_row.index:
+        return None
+    resolved = pd.to_numeric(pd.Series([day_row[column_name]]), errors="coerce").iloc[0]
+    if pd.isna(resolved):
+        return None
+    resolved_value = float(resolved)
+    if not _compare_threshold(resolved_value, operator, threshold):
+        return None
+    return resolved_value
+
+
+def _build_board_ma_filter_rule(params: AnalysisParams) -> NumericThresholdRule:
+    return NumericThresholdRule(
+        column_name=_board_ma_column_name(params.board_ma_filter_line),
+        operator=params.board_ma_filter_operator,
+        threshold=params.board_ma_filter_threshold,
+        value_column_name="board_ma_signal_value",
+    )
+
+
+def _build_imported_indicator_filter_rule(params: AnalysisParams) -> NumericThresholdRule:
+    return NumericThresholdRule(
+        column_name=params.imported_indicator_filter_column,
+        operator=params.imported_indicator_filter_operator,
+        threshold=params.imported_indicator_filter_threshold,
+        value_column_name="imported_indicator_filter_value",
+    )
+
+
+def _build_board_ma_exit_rule(params: AnalysisParams) -> NumericThresholdRule:
+    return NumericThresholdRule(
+        column_name=_board_ma_column_name(params.board_ma_exit_line),
+        operator=params.board_ma_exit_operator,
+        threshold=params.board_ma_exit_threshold,
+        value_column_name="board_ma_value",
+    )
+
+
+def _build_imported_indicator_exit_rule(params: AnalysisParams) -> NumericThresholdRule:
+    return NumericThresholdRule(
+        column_name=params.imported_indicator_exit_column,
+        operator=params.imported_indicator_exit_operator,
+        threshold=params.imported_indicator_exit_threshold,
+        value_column_name="imported_indicator_exit_value",
+    )
+
+
+def _build_numeric_rule(rule: ImportedIndicatorRule, value_column_name: str) -> NumericThresholdRule:
+    return NumericThresholdRule(
+        column_name=rule.column,
+        operator=rule.operator,
+        threshold=rule.threshold,
+        value_column_name=value_column_name,
+    )
+
+
 def _build_entry_reason(params: AnalysisParams, entry_factor: str) -> str:
     direction_text = "up" if params.gap_direction == "up" else "down"
     if entry_factor == "gap":
@@ -125,6 +225,7 @@ def _exit_reason_label(exit_type: str) -> str:
         "profit_drawdown": "profit_drawdown: 分批利润回撤触发",
         "profit_drawdown_exit": "profit_drawdown_exit: 整笔利润回撤触发",
         "board_ma_exit": "board_ma_exit: 板块均线离场触发",
+        "imported_indicator_exit": "imported_indicator_exit: 导入指标离场触发",
         "ma_exit": "ma_exit: 均线离场触发",
         "atr_trailing": "atr_trailing: ATR 跟踪止盈触发",
         "time_exit": "time_exit: 时间退出触发",
@@ -526,16 +627,37 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
         signal_mask &= stock_df["atr_filter_pct"] <= params.max_atr_filter_pct
 
     if params.enable_board_ma_filter:
-        board_ma_signal = _board_ma_series(stock_df, params.board_ma_filter_line)
-        stock_df["board_ma_signal_value"] = board_ma_signal
-        signal_mask &= board_ma_signal.notna()
-        signal_mask &= board_ma_signal.apply(
-            lambda value: _compare_board_ma(float(value), params.board_ma_filter_operator, params.board_ma_filter_threshold)
-            if pd.notna(value)
-            else False
+        board_ma_filter_rule = _build_board_ma_filter_rule(params)
+        signal_mask = _apply_numeric_threshold_filter(
+            stock_df,
+            signal_mask,
+            column_name=board_ma_filter_rule.column_name,
+            operator=board_ma_filter_rule.operator,
+            threshold=board_ma_filter_rule.threshold,
+            value_column_name=board_ma_filter_rule.value_column_name,
         )
     else:
         stock_df["board_ma_signal_value"] = math.nan
+
+    imported_filter_rules = params.effective_imported_indicator_filters
+    if imported_filter_rules:
+        collected_filter_values: list[pd.Series] = []
+        for rule_index, rule in enumerate(imported_filter_rules, start=1):
+            numeric_rule = _build_numeric_rule(
+                rule, f"imported_indicator_filter_value_{rule_index}"
+            )
+            signal_mask = _apply_numeric_threshold_filter(
+                stock_df,
+                signal_mask,
+                column_name=numeric_rule.column_name,
+                operator=numeric_rule.operator,
+                threshold=numeric_rule.threshold,
+                value_column_name=numeric_rule.value_column_name,
+            )
+            collected_filter_values.append(stock_df[numeric_rule.value_column_name])
+        stock_df["imported_indicator_filter_value"] = collected_filter_values[0]
+    else:
+        stock_df["imported_indicator_filter_value"] = math.nan
 
     stock_df["is_signal"] = signal_mask
     return stock_df
@@ -817,6 +939,7 @@ def simulate_trade(
     triggered_profit_drawdown_ratio = math.nan
     triggered_exit_ma_value = math.nan
     triggered_board_ma_value = math.nan
+    triggered_imported_indicator_exit_value = math.nan
     trailing_reference_price = (
         float(signal_row["low"]) if direction == "short" else float(signal_row["high"])
     )
@@ -1002,27 +1125,51 @@ def simulate_trade(
 
         # 3) 整笔 OR 离场（对剩余仓位统一生效）
         if remaining_weight > EPSILON and params.enable_board_ma_exit:
-            board_ma_value = _float_scalar(
-                _board_ma_series(stock_df, params.board_ma_exit_line).iloc[day_idx]
+            board_ma_exit_rule = _build_board_ma_exit_rule(params)
+            board_ma_value = _resolve_numeric_threshold_exit(
+                day_row,
+                column_name=board_ma_exit_rule.column_name,
+                operator=board_ma_exit_rule.operator,
+                threshold=board_ma_exit_rule.threshold,
             )
-            if not pd.isna(board_ma_value):
-                exit_hit = _compare_board_ma(
-                    float(board_ma_value),
-                    params.board_ma_exit_operator,
-                    params.board_ma_exit_threshold,
-                )
-                if exit_hit:
-                    fills.append(
-                        TradeFill(
-                            _trade_timestamp_str(day_date, params),
-                            _apply_exit_slippage(day_close, params, direction),
-                            remaining_weight,
-                            "board_ma_exit",
-                            holding_days,
-                        )
+            if board_ma_value is not None:
+                fills.append(
+                    TradeFill(
+                        _trade_timestamp_str(day_date, params),
+                        _apply_exit_slippage(day_close, params, direction),
+                        remaining_weight,
+                        "board_ma_exit",
+                        holding_days,
                     )
-                    triggered_board_ma_value = board_ma_value
-                    remaining_weight = 0.0
+                )
+                triggered_board_ma_value = board_ma_value
+                remaining_weight = 0.0
+
+        if remaining_weight > EPSILON:
+            for rule in params.effective_imported_indicator_exits:
+                imported_indicator_exit_rule = _build_numeric_rule(
+                    rule, "imported_indicator_exit_value"
+                )
+                imported_indicator_exit_value = _resolve_numeric_threshold_exit(
+                    day_row,
+                    column_name=imported_indicator_exit_rule.column_name,
+                    operator=imported_indicator_exit_rule.operator,
+                    threshold=imported_indicator_exit_rule.threshold,
+                )
+                if imported_indicator_exit_value is None:
+                    continue
+                fills.append(
+                    TradeFill(
+                        _trade_timestamp_str(day_date, params),
+                        _apply_exit_slippage(day_close, params, direction),
+                        remaining_weight,
+                        "imported_indicator_exit",
+                        holding_days,
+                    )
+                )
+                triggered_imported_indicator_exit_value = imported_indicator_exit_value
+                remaining_weight = 0.0
+                break
 
         # 4) 旧版整笔退出
         if (not params.partial_exit_enabled) and remaining_weight > EPSILON:
@@ -1259,6 +1406,9 @@ def simulate_trade(
         else math.nan,
         "board_ma_value": float(triggered_board_ma_value)
         if pd.notna(triggered_board_ma_value)
+        else math.nan,
+        "imported_indicator_exit_value": float(triggered_imported_indicator_exit_value)
+        if pd.notna(triggered_imported_indicator_exit_value)
         else math.nan,
         "entry_factor": entry_factor,
         "entry_reason": _build_entry_reason(params, entry_factor),

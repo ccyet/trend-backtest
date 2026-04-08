@@ -254,6 +254,16 @@ class PartialExitRule:
 
 
 @dataclass(frozen=True)
+class ImportedIndicatorRule:
+    enabled: bool
+    indicator_key: str
+    column: str
+    operator: str
+    threshold: float
+    priority: int = 1
+
+
+@dataclass(frozen=True)
 class TradeFill:
     sell_date: str
     sell_price: float
@@ -337,6 +347,18 @@ class AnalysisParams:
     board_ma_filter_line: str = "20"
     board_ma_filter_operator: str = ">="
     board_ma_filter_threshold: float = 0.0
+    enable_imported_indicator_filter: bool = False
+    imported_indicator_filter_key: str = ""
+    imported_indicator_filter_column: str = ""
+    imported_indicator_filter_operator: str = ">="
+    imported_indicator_filter_threshold: float = 0.0
+    imported_indicator_filters: tuple[ImportedIndicatorRule, ...] = ()
+    enable_imported_indicator_exit: bool = False
+    imported_indicator_exit_key: str = ""
+    imported_indicator_exit_column: str = ""
+    imported_indicator_exit_operator: str = "<="
+    imported_indicator_exit_threshold: float = 0.0
+    imported_indicator_exits: tuple[ImportedIndicatorRule, ...] = ()
     enable_board_ma_exit: bool = False
     board_ma_exit_line: str = "20"
     board_ma_exit_operator: str = "<="
@@ -395,6 +417,42 @@ class AnalysisParams:
     @property
     def sell_cost_ratio(self) -> float:
         return self.sell_cost_pct / 100.0
+
+    @property
+    def effective_imported_indicator_filters(self) -> tuple[ImportedIndicatorRule, ...]:
+        enabled_rules = tuple(rule for rule in self.imported_indicator_filters if rule.enabled)
+        if enabled_rules:
+            return enabled_rules
+        if not self.enable_imported_indicator_filter:
+            return ()
+        return (
+            ImportedIndicatorRule(
+                enabled=True,
+                indicator_key=self.imported_indicator_filter_key,
+                column=self.imported_indicator_filter_column,
+                operator=self.imported_indicator_filter_operator,
+                threshold=self.imported_indicator_filter_threshold,
+                priority=1,
+            ),
+        )
+
+    @property
+    def effective_imported_indicator_exits(self) -> tuple[ImportedIndicatorRule, ...]:
+        enabled_rules = tuple(rule for rule in self.imported_indicator_exits if rule.enabled)
+        if enabled_rules:
+            return tuple(sorted(enabled_rules, key=lambda rule: rule.priority))
+        if not self.enable_imported_indicator_exit:
+            return ()
+        return (
+            ImportedIndicatorRule(
+                enabled=True,
+                indicator_key=self.imported_indicator_exit_key,
+                column=self.imported_indicator_exit_column,
+                operator=self.imported_indicator_exit_operator,
+                threshold=self.imported_indicator_exit_threshold,
+                priority=1,
+            ),
+        )
 
     @property
     def buy_slippage_ratio(self) -> float:
@@ -780,6 +838,22 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.enable_board_ma_filter and params.board_ma_filter_threshold > 100:
         errors.append("板块均线开仓过滤阈值不能大于 100。")
+
+    for index, rule in enumerate(params.effective_imported_indicator_filters, start=1):
+        if not rule.indicator_key.strip():
+            errors.append(f"导入指标过滤规则 {index} 未选择指标。")
+        if not rule.column.strip():
+            errors.append(f"导入指标过滤规则 {index} 未选择输出列。")
+        if rule.operator not in {">=", "<="}:
+            errors.append(f"导入指标过滤规则 {index} 比较方向仅支持 >= 或 <=。")
+
+    for index, rule in enumerate(params.effective_imported_indicator_exits, start=1):
+        if not rule.indicator_key.strip():
+            errors.append(f"导入指标离场规则 {index} 未选择指标。")
+        if not rule.column.strip():
+            errors.append(f"导入指标离场规则 {index} 未选择输出列。")
+        if rule.operator not in {">=", "<="}:
+            errors.append(f"导入指标离场规则 {index} 比较方向仅支持 >= 或 <=。")
 
     if params.enable_board_ma_exit and params.board_ma_exit_line not in {"20", "50"}:
         errors.append("板块均线离场仅支持 20 或 50 日占比。")
