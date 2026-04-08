@@ -4,7 +4,7 @@ from typing import Any
 
 import pandas as pd
 
-from models import AnalysisParams
+from models import AnalysisParams, ImportedIndicatorRule, PartialExitRule
 from rules import apply_gap_filters, simulate_trade
 
 
@@ -254,6 +254,193 @@ def test_board_ma_filter_can_use_less_equal_for_long_signal() -> None:
     assert bool(result.loc[1, "is_signal"])
 
 
+def test_board_ma_filter_legacy_rule_matches_generic_threshold_engine_output() -> None:
+    df = make_df_with_board_ma(
+        [(100.0, 101.0, 99.0, 100.0, 1000), (104.0, 105.0, 103.0, 104.0, 1000)],
+        [40.0, 55.0],
+        [35.0, 38.0],
+    )
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="gap",
+            enable_board_ma_filter=True,
+            board_ma_filter_line="20",
+            board_ma_filter_operator=">=",
+            board_ma_filter_threshold=50.0,
+        ),
+    )
+
+    assert float(result.loc[1, "board_ma_signal_value"]) == 55.0
+    assert bool(result.loc[1, "is_signal"])
+
+
+def test_imported_indicator_filter_blocks_signal_when_value_below_threshold() -> None:
+    df = make_df([(100.0, 101.0, 99.0, 100.0, 1000), (104.0, 105.0, 103.0, 104.0, 1000)])
+    df["custom_strength"] = [40.0, 45.0]
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="gap",
+            enable_imported_indicator_filter=True,
+            imported_indicator_filter_key="custom_indicator",
+            imported_indicator_filter_column="custom_strength",
+            imported_indicator_filter_operator=">=",
+            imported_indicator_filter_threshold=50.0,
+        ),
+    )
+
+    assert float(result.loc[1, "imported_indicator_filter_value"]) == 45.0
+    assert not bool(result.loc[1, "is_signal"])
+
+
+def test_imported_indicator_filter_fails_closed_when_column_missing() -> None:
+    df = make_df([(100.0, 101.0, 99.0, 100.0, 1000), (104.0, 105.0, 103.0, 104.0, 1000)])
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="gap",
+            enable_imported_indicator_filter=True,
+            imported_indicator_filter_key="custom_indicator",
+            imported_indicator_filter_column="missing_column",
+            imported_indicator_filter_operator=">=",
+            imported_indicator_filter_threshold=50.0,
+        ),
+    )
+
+    assert pd.isna(result.loc[1, "imported_indicator_filter_value"])
+    assert not bool(result.loc[1, "is_signal"])
+
+
+def test_multiple_imported_indicator_filters_use_and_semantics() -> None:
+    df = make_df([(100.0, 101.0, 99.0, 100.0, 1000), (104.0, 105.0, 103.0, 104.0, 1000)])
+    df["strength"] = [60.0, 55.0]
+    df["breadth"] = [25.0, 15.0]
+    params = make_params(
+        imported_indicator_filters=(
+            ImportedIndicatorRule(True, "ind_a", "strength", ">=", 50.0, 1),
+            ImportedIndicatorRule(True, "ind_b", "breadth", ">=", 20.0, 2),
+        )
+    )
+    result = apply_gap_filters(df, params)
+
+    assert float(result.loc[1, "imported_indicator_filter_value_1"]) == 55.0
+    assert float(result.loc[1, "imported_indicator_filter_value_2"]) == 15.0
+    assert not bool(result.loc[1, "is_signal"])
+
+
+def test_imported_indicator_exit_triggers_whole_position_exit_for_long_trade() -> None:
+    df = make_df(
+        [
+            (100.0, 101.0, 99.0, 100.0, 1000),
+            (104.0, 106.0, 103.0, 105.0, 1000),
+            (105.0, 106.0, 104.0, 105.0, 1000),
+        ]
+    )
+    df["custom_exit"] = [15.0, 12.0, 8.0]
+    params = make_params(
+        entry_factor="gap",
+        enable_imported_indicator_exit=True,
+        imported_indicator_exit_key="custom_indicator",
+        imported_indicator_exit_column="custom_exit",
+        imported_indicator_exit_operator="<=",
+        imported_indicator_exit_threshold=10.0,
+        enable_take_profit=False,
+    )
+    enriched = apply_gap_filters(df, params)
+    trade, reason = simulate_trade(enriched, 1, params)
+
+    assert reason is None
+    assert trade is not None
+    assert trade["exit_type"] == "imported_indicator_exit"
+    assert trade["imported_indicator_exit_value"] == 8.0
+
+
+def test_imported_indicator_exit_only_closes_remaining_weight_after_partial_exit() -> None:
+    df = make_df(
+        [
+            (100.0, 101.0, 99.0, 100.0, 1000),
+            (104.0, 106.0, 103.0, 105.0, 1000),
+            (105.0, 112.0, 104.0, 105.0, 1000),
+        ]
+    )
+    df["custom_exit"] = [15.0, 12.0, 8.0]
+    params = make_params(
+        entry_factor="gap",
+        enable_imported_indicator_exit=True,
+        imported_indicator_exit_key="custom_indicator",
+        imported_indicator_exit_column="custom_exit",
+        imported_indicator_exit_operator="<=",
+        imported_indicator_exit_threshold=10.0,
+        partial_exit_enabled=True,
+        partial_exit_count=2,
+        partial_exit_rules=(
+            PartialExitRule(enabled=True, weight_pct=50.0, priority=1, mode="fixed_tp", target_profit_pct=1.0),
+            PartialExitRule(enabled=True, weight_pct=50.0, priority=2, mode="fixed_tp", target_profit_pct=30.0),
+        ),
+        enable_take_profit=False,
+    )
+    enriched = apply_gap_filters(df, params)
+    trade, reason = simulate_trade(enriched, 1, params)
+
+    assert reason is None
+    assert trade is not None
+    assert trade["exit_type"] == "fixed_tp+imported_indicator_exit"
+    assert len(trade["fills"]) == 2
+
+
+def test_imported_indicator_exit_missing_value_does_not_trigger() -> None:
+    df = make_df(
+        [
+            (100.0, 101.0, 99.0, 100.0, 1000),
+            (104.0, 106.0, 103.0, 105.0, 1000),
+            (105.0, 106.0, 104.0, 105.0, 1000),
+        ]
+    )
+    params = make_params(
+        entry_factor="gap",
+        enable_imported_indicator_exit=True,
+        imported_indicator_exit_key="custom_indicator",
+        imported_indicator_exit_column="missing_exit",
+        imported_indicator_exit_operator="<=",
+        imported_indicator_exit_threshold=10.0,
+        enable_take_profit=False,
+        time_exit_mode="force_close",
+    )
+    enriched = apply_gap_filters(df, params)
+    trade, reason = simulate_trade(enriched, 1, params)
+
+    assert reason is None
+    assert trade is not None
+    assert trade["exit_type"] == "force_close"
+
+
+def test_multiple_imported_indicator_exit_rules_trigger_in_priority_order() -> None:
+    df = make_df(
+        [
+            (100.0, 101.0, 99.0, 100.0, 1000),
+            (104.0, 106.0, 103.0, 105.0, 1000),
+            (105.0, 106.0, 104.0, 105.0, 1000),
+        ]
+    )
+    df["exit_a"] = [20.0, 15.0, 8.0]
+    df["exit_b"] = [20.0, 15.0, 4.0]
+    params = make_params(
+        imported_indicator_exits=(
+            ImportedIndicatorRule(True, "ind_a", "exit_a", "<=", 10.0, 1),
+            ImportedIndicatorRule(True, "ind_b", "exit_b", "<=", 10.0, 2),
+        ),
+        enable_take_profit=False,
+    )
+    enriched = apply_gap_filters(df, params)
+    trade, reason = simulate_trade(enriched, 1, params)
+
+    assert reason is None
+    assert trade is not None
+    assert trade["exit_type"] == "imported_indicator_exit"
+    assert trade["imported_indicator_exit_value"] == 8.0
+
+
 def test_trend_breakout_long_open_fill_uses_open_price() -> None:
     df = make_df(
         [
@@ -487,6 +674,33 @@ def test_board_ma_exit_can_use_greater_equal_for_long_trade() -> None:
     assert trade is not None
     assert trade["exit_type"] == "board_ma_exit"
     assert trade["board_ma_value"] == 65.0
+
+
+def test_board_ma_exit_legacy_rule_matches_generic_threshold_engine_output() -> None:
+    df = make_df_with_board_ma(
+        [
+            (100.0, 101.0, 99.0, 100.0, 1000),
+            (104.0, 106.0, 103.0, 105.0, 1000),
+            (105.0, 106.0, 104.0, 105.0, 1000),
+        ],
+        [60.0, 55.0, 35.0],
+        [58.0, 56.0, 34.0],
+    )
+    params = make_params(
+        entry_factor="gap",
+        enable_board_ma_exit=True,
+        board_ma_exit_line="20",
+        board_ma_exit_operator="<=",
+        board_ma_exit_threshold=40.0,
+        enable_take_profit=False,
+    )
+    enriched = apply_gap_filters(df, params)
+    trade, reason = simulate_trade(enriched, 1, params)
+
+    assert reason is None
+    assert trade is not None
+    assert trade["exit_type"] == "board_ma_exit"
+    assert trade["board_ma_value"] == 35.0
 
 
 def test_trend_breakout_missing_volume_remains_fillable() -> None:

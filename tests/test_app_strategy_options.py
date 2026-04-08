@@ -136,6 +136,48 @@ def test_app_exposes_board_ma_filter_and_exit_controls() -> None:
     assert "离场比较方向" in selectbox_labels
 
 
+def test_app_exposes_generic_imported_indicator_filter_controls() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    checkbox_labels = [widget.label for widget in app.checkbox]
+    selectbox_labels = [widget.label for widget in app.selectbox]
+    number_input_labels = [widget.label for widget in app.number_input]
+
+    assert "启用导入指标过滤" in checkbox_labels
+    assert any(label.startswith("导入指标 ") for label in selectbox_labels)
+    assert any(label.startswith("输出列 ") for label in selectbox_labels)
+    assert any(label.startswith("比较方向 ") for label in selectbox_labels)
+    assert any(label.startswith("阈值 ") for label in number_input_labels)
+
+
+def test_app_exposes_generic_imported_indicator_exit_controls() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    checkbox_labels = [widget.label for widget in app.checkbox]
+    selectbox_labels = [widget.label for widget in app.selectbox]
+    number_input_labels = [widget.label for widget in app.number_input]
+
+    assert "启用导入指标离场" in checkbox_labels
+    assert any(label.startswith("离场导入指标 ") for label in selectbox_labels)
+    assert any(label.startswith("离场输出列 ") for label in selectbox_labels)
+    assert any(label.startswith("离场比较方向 ") for label in selectbox_labels)
+    assert any(label.startswith("离场阈值 ") for label in number_input_labels)
+
+
+def test_app_exposes_multiple_imported_indicator_rule_rows() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    checkbox_labels = [widget.label for widget in app.checkbox]
+    assert "规则 1" in checkbox_labels
+    assert "规则 2" in checkbox_labels
+    assert "规则 3" in checkbox_labels
+    assert "离场规则 1" in checkbox_labels
+    assert "启用板块均线离场（整笔）" in checkbox_labels
+
+
 def test_app_preserves_candle_run_length_above_two() -> None:
     app = AppTest.from_file("app.py", default_timeout=10)
     app.run()

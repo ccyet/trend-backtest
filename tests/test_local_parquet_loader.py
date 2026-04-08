@@ -340,3 +340,91 @@ def test_validate_params_accepts_board_ma_controls() -> None:
     )
     errors, _ = validate_params(params)
     assert not errors
+
+
+def test_validate_params_accepts_generic_imported_indicator_filter() -> None:
+    params = AnalysisParams(
+        data_source_type="local_parquet",
+        db_path="",
+        table_name=None,
+        column_overrides={},
+        excel_sheet_name=None,
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        stock_codes=(),
+        gap_direction="up",
+        gap_pct=2.0,
+        max_gap_filter_pct=9.9,
+        use_ma_filter=False,
+        fast_ma_period=5,
+        slow_ma_period=20,
+        time_stop_days=2,
+        time_stop_target_pct=1.0,
+        stop_loss_pct=5.0,
+        take_profit_pct=5.0,
+        enable_take_profit=True,
+        enable_profit_drawdown_exit=False,
+        profit_drawdown_pct=40.0,
+        enable_ma_exit=False,
+        exit_ma_period=10,
+        ma_exit_batches=2,
+        partial_exit_enabled=False,
+        partial_exit_count=2,
+        partial_exit_rules=(),
+        buy_cost_pct=0.0,
+        sell_cost_pct=0.0,
+        time_exit_mode="strict",
+        local_data_root="data/market/daily",
+        adjust="qfq",
+        enable_imported_indicator_filter=True,
+        imported_indicator_filter_key="custom_indicator",
+        imported_indicator_filter_column="custom_strength",
+        imported_indicator_filter_operator=">=",
+        imported_indicator_filter_threshold=50.0,
+    )
+    errors, _ = validate_params(params)
+    assert not errors
+
+
+def test_validate_params_accepts_generic_imported_indicator_exit() -> None:
+    params = AnalysisParams(
+        data_source_type="local_parquet",
+        db_path="",
+        table_name=None,
+        column_overrides={},
+        excel_sheet_name=None,
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        stock_codes=(),
+        gap_direction="up",
+        gap_pct=2.0,
+        max_gap_filter_pct=9.9,
+        use_ma_filter=False,
+        fast_ma_period=5,
+        slow_ma_period=20,
+        time_stop_days=2,
+        time_stop_target_pct=1.0,
+        stop_loss_pct=5.0,
+        take_profit_pct=5.0,
+        enable_take_profit=True,
+        enable_profit_drawdown_exit=False,
+        profit_drawdown_pct=40.0,
+        enable_ma_exit=False,
+        exit_ma_period=10,
+        ma_exit_batches=2,
+        partial_exit_enabled=False,
+        partial_exit_count=2,
+        partial_exit_rules=(),
+        buy_cost_pct=0.0,
+        sell_cost_pct=0.0,
+        time_exit_mode="strict",
+        local_data_root="data/market/daily",
+        adjust="qfq",
+        enable_imported_indicator_exit=True,
+        imported_indicator_exit_key="custom_indicator",
+        imported_indicator_exit_column="custom_exit",
+        imported_indicator_exit_operator="<=",
+        imported_indicator_exit_threshold=10.0,
+    )
+    errors, _ = validate_params(params)
+    assert not errors
