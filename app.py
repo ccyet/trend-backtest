@@ -39,6 +39,7 @@ from models import (
     ENTRY_FACTORS,
     FACTOR_SCAN_ELIGIBLE_FIELDS,
     GAP_ENTRY_MODES,
+    ImportedIndicatorRule,
     ParamScanAxis,
     ParamScanConfig,
     PartialExitRule,
@@ -327,6 +328,10 @@ FACTOR_CONTROL_DEFAULTS: dict[str, str | int | float] = {
     "board_ma_filter_line": "20",
     "board_ma_filter_operator": ">=",
     "board_ma_filter_threshold": 50.0,
+    "imported_indicator_filter_operator": ">=",
+    "imported_indicator_filter_threshold": 0.0,
+    "imported_indicator_exit_operator": "<=",
+    "imported_indicator_exit_threshold": 0.0,
     "board_ma_exit_line": "20",
     "board_ma_exit_operator": "<=",
     "board_ma_exit_threshold": 40.0,
@@ -337,6 +342,7 @@ FACTOR_CONTROL_DEFAULTS: dict[str, str | int | float] = {
 }
 BOARD_MA_LINE_LABELS = {"20": "均20占比", "50": "均50占比"}
 BOARD_MA_OPERATOR_LABELS = {">=": "高于/等于阈值", "<=": "低于/等于阈值"}
+IMPORTED_INDICATOR_OPERATOR_LABELS = BOARD_MA_OPERATOR_LABELS.copy()
 SCAN_AXIS_STATE_KEYS = (
     ("scan_axis_1_field", "scan_axis_1_values"),
     ("scan_axis_2_field", "scan_axis_2_values"),
@@ -1833,6 +1839,66 @@ def format_indicator_quality_for_display(preview_df: pd.DataFrame) -> pd.DataFra
     )
 
 
+def imported_indicator_filter_options(
+    registry_df: pd.DataFrame,
+) -> tuple[list[str], dict[str, list[str]], dict[str, str]]:
+    if registry_df.empty:
+        return [""], {}, {}
+    filtered = registry_df.loc[registry_df["allow_filter"].astype(bool)].copy()
+    if filtered.empty:
+        return [""], {}, {}
+    key_to_columns: dict[str, list[str]] = {}
+    key_to_label: dict[str, str] = {}
+    ordered_keys = [""]
+    for row in filtered.to_dict("records"):
+        indicator_key = str(row.get("indicator_key", "")).strip()
+        if not indicator_key:
+            continue
+        key_to_label[indicator_key] = str(row.get("display_name", indicator_key))
+        output_columns = [
+            item.strip()
+            for item in str(row.get("output_columns", "")).split(",")
+            if item.strip()
+        ]
+        key_to_columns[indicator_key] = output_columns
+        ordered_keys.append(indicator_key)
+    return ordered_keys, key_to_columns, key_to_label
+
+
+def build_imported_indicator_rules(
+    *,
+    prefix: str,
+    count: int,
+    default_enabled: bool,
+) -> tuple[ImportedIndicatorRule, ...]:
+    default_operator = ">=" if prefix == "imported_filter" else "<="
+    rules: list[ImportedIndicatorRule] = []
+    for index in range(1, count + 1):
+        rules.append(
+            ImportedIndicatorRule(
+                enabled=bool(
+                    st.session_state.get(
+                        f"{prefix}_rule_enabled_{index}",
+                        default_enabled if index == 1 else False,
+                    )
+                ),
+                indicator_key=str(st.session_state.get(f"{prefix}_key_{index}", "")),
+                column=str(st.session_state.get(f"{prefix}_column_{index}", "")),
+                operator=str(
+                    st.session_state.get(
+                        f"{prefix}_operator_{index}",
+                        default_operator,
+                    )
+                ),
+                threshold=float(
+                    st.session_state.get(f"{prefix}_threshold_{index}", 0.0)
+                ),
+                priority=index,
+            )
+        )
+    return tuple(rules)
+
+
 def format_local_inventory_for_display(preview_df: pd.DataFrame) -> pd.DataFrame:
     if preview_df.empty:
         return preview_df
@@ -3052,6 +3118,65 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
             step=1.0,
             disabled=not enable_board_ma_filter,
         )
+        imported_filter_registry = load_indicator_registry_preview()
+        imported_filter_options, imported_filter_columns, imported_filter_labels = (
+            imported_indicator_filter_options(imported_filter_registry)
+        )
+        st.markdown("**导入指标过滤（可选）**")
+        enable_imported_indicator_filter = st.checkbox(
+            "启用导入指标过滤", value=False, key="enable_imported_indicator_filter"
+        )
+        for rule_index in range(1, 4):
+            imported_filter_cols = st.columns([0.8, 1.2, 1.2, 1, 1])
+            imported_filter_rule_enabled = imported_filter_cols[0].checkbox(
+                f"规则 {rule_index}",
+                value=enable_imported_indicator_filter if rule_index == 1 else False,
+                disabled=not enable_imported_indicator_filter,
+                key=f"imported_filter_rule_enabled_{rule_index}",
+            )
+            imported_indicator_filter_key = imported_filter_cols[1].selectbox(
+                f"导入指标 {rule_index}",
+                options=imported_filter_options,
+                index=0,
+                format_func=lambda value: (
+                    "请选择指标"
+                    if str(value) == ""
+                    else imported_filter_labels.get(str(value), str(value))
+                ),
+                disabled=(not imported_filter_rule_enabled) or len(imported_filter_options) <= 1,
+                key=f"imported_filter_key_{rule_index}",
+            )
+            selected_imported_columns = imported_filter_columns.get(
+                str(imported_indicator_filter_key), []
+            )
+            imported_filter_cols[2].selectbox(
+                f"输出列 {rule_index}",
+                options=selected_imported_columns or [""],
+                index=0,
+                format_func=lambda value: "请选择输出列" if str(value) == "" else str(value),
+                disabled=(not imported_filter_rule_enabled) or not selected_imported_columns,
+                key=f"imported_filter_column_{rule_index}",
+            )
+            imported_filter_cols[3].selectbox(
+                f"比较方向 {rule_index}",
+                options=[">=", "<="],
+                index=[">=", "<="].index(
+                    str(factor_control_default("imported_indicator_filter_operator"))
+                ),
+                format_func=lambda value: IMPORTED_INDICATOR_OPERATOR_LABELS.get(
+                    str(value), str(value)
+                ),
+                disabled=not imported_filter_rule_enabled,
+                key=f"imported_filter_operator_{rule_index}",
+            )
+            imported_filter_cols[4].number_input(
+                f"阈值 {rule_index}",
+                value=float(factor_control_default("imported_indicator_filter_threshold")),
+                step=0.1,
+                disabled=not imported_filter_rule_enabled,
+                key=f"imported_filter_threshold_{rule_index}",
+            )
+        st.caption("导入指标过滤会在主入场信号生成后追加筛选；当前第一版支持单个指标单列阈值过滤。")
 
     with core_exit_col:
         st.markdown("**退出与风控**")
@@ -3126,6 +3251,65 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
             step=1.0,
             disabled=not enable_board_ma_exit,
         )
+        imported_exit_registry = load_indicator_registry_preview()
+        imported_exit_options, imported_exit_columns, imported_exit_labels = (
+            imported_indicator_filter_options(imported_exit_registry)
+        )
+        st.markdown("**导入指标离场（整笔）**")
+        enable_imported_indicator_exit = st.checkbox(
+            "启用导入指标离场", value=False, key="enable_imported_indicator_exit"
+        )
+        for rule_index in range(1, 4):
+            imported_exit_cols = st.columns([0.8, 1.2, 1.2, 1, 1])
+            imported_exit_rule_enabled = imported_exit_cols[0].checkbox(
+                f"离场规则 {rule_index}",
+                value=enable_imported_indicator_exit if rule_index == 1 else False,
+                disabled=not enable_imported_indicator_exit,
+                key=f"imported_exit_rule_enabled_{rule_index}",
+            )
+            imported_indicator_exit_key = imported_exit_cols[1].selectbox(
+                f"离场导入指标 {rule_index}",
+                options=imported_exit_options,
+                index=0,
+                format_func=lambda value: (
+                    "请选择指标"
+                    if str(value) == ""
+                    else imported_exit_labels.get(str(value), str(value))
+                ),
+                disabled=(not imported_exit_rule_enabled) or len(imported_exit_options) <= 1,
+                key=f"imported_exit_key_{rule_index}",
+            )
+            selected_imported_exit_columns = imported_exit_columns.get(
+                str(imported_indicator_exit_key), []
+            )
+            imported_exit_cols[2].selectbox(
+                f"离场输出列 {rule_index}",
+                options=selected_imported_exit_columns or [""],
+                index=0,
+                format_func=lambda value: "请选择输出列" if str(value) == "" else str(value),
+                disabled=(not imported_exit_rule_enabled) or not selected_imported_exit_columns,
+                key=f"imported_exit_column_{rule_index}",
+            )
+            imported_exit_cols[3].selectbox(
+                f"离场比较方向 {rule_index}",
+                options=[">=", "<="],
+                index=[">=", "<="].index(
+                    str(factor_control_default("imported_indicator_exit_operator"))
+                ),
+                format_func=lambda value: IMPORTED_INDICATOR_OPERATOR_LABELS.get(
+                    str(value), str(value)
+                ),
+                disabled=not imported_exit_rule_enabled,
+                key=f"imported_exit_operator_{rule_index}",
+            )
+            imported_exit_cols[4].number_input(
+                f"离场阈值 {rule_index}",
+                value=float(factor_control_default("imported_indicator_exit_threshold")),
+                step=0.1,
+                disabled=not imported_exit_rule_enabled,
+                key=f"imported_exit_threshold_{rule_index}",
+            )
+        st.caption("导入指标离场按整笔退出处理，但只作用于当时剩余仓位；若同 bar 已先发生分批退出，则只平掉剩余部分。")
         ma_exit_cols = st.columns(2)
         enable_ma_exit = ma_exit_cols[0].checkbox("启用均线离场（整笔）", value=False)
         exit_ma_period = ma_exit_cols[1].number_input(
@@ -3429,6 +3613,16 @@ if submitted:
         }
     )
     partial_rules = tuple(PartialExitRule(**rule) for rule in partial_rule_inputs)
+    imported_filter_rules = build_imported_indicator_rules(
+        prefix="imported_filter",
+        count=3,
+        default_enabled=bool(enable_imported_indicator_filter),
+    )
+    imported_exit_rules = build_imported_indicator_rules(
+        prefix="imported_exit",
+        count=3,
+        default_enabled=bool(enable_imported_indicator_exit),
+    )
     scan_axes = tuple(
         axis
         for axis in (
@@ -3487,6 +3681,12 @@ if submitted:
         board_ma_filter_line=str(board_ma_filter_line),
         board_ma_filter_operator=str(board_ma_filter_operator),
         board_ma_filter_threshold=float(board_ma_filter_threshold),
+        enable_imported_indicator_filter=bool(enable_imported_indicator_filter),
+        imported_indicator_filter_key=str(st.session_state.get("imported_filter_key_1", "")),
+        imported_indicator_filter_column=str(st.session_state.get("imported_filter_column_1", "")),
+        imported_indicator_filter_operator=str(st.session_state.get("imported_filter_operator_1", factor_control_default("imported_indicator_filter_operator"))),
+        imported_indicator_filter_threshold=float(st.session_state.get("imported_filter_threshold_1", factor_control_default("imported_indicator_filter_threshold"))),
+        imported_indicator_filters=imported_filter_rules,
         time_stop_days=int(time_stop_days),
         time_stop_target_pct=float(time_stop_target_pct),
         stop_loss_pct=float(stop_loss_pct),
@@ -3501,6 +3701,12 @@ if submitted:
         board_ma_exit_line=str(board_ma_exit_line),
         board_ma_exit_operator=str(board_ma_exit_operator),
         board_ma_exit_threshold=float(board_ma_exit_threshold),
+        enable_imported_indicator_exit=bool(enable_imported_indicator_exit),
+        imported_indicator_exit_key=str(st.session_state.get("imported_exit_key_1", "")),
+        imported_indicator_exit_column=str(st.session_state.get("imported_exit_column_1", "")),
+        imported_indicator_exit_operator=str(st.session_state.get("imported_exit_operator_1", factor_control_default("imported_indicator_exit_operator"))),
+        imported_indicator_exit_threshold=float(st.session_state.get("imported_exit_threshold_1", factor_control_default("imported_indicator_exit_threshold"))),
+        imported_indicator_exits=imported_exit_rules,
         enable_ma_exit=bool(enable_ma_exit),
         exit_ma_period=int(exit_ma_period),
         enable_atr_trailing_exit=bool(enable_atr_trailing_exit),
@@ -3558,10 +3764,35 @@ if submitted:
         try:
             with st.spinner("正在运行回测，请稍候..."):
                 indicator_keys: tuple[str, ...] = (
-                    ("board_ma",)
-                    if params.enable_board_ma_filter or params.enable_board_ma_exit
-                    else ()
+                    tuple(
+                        dict.fromkeys(
+                            key
+                            for key in (
+                                "board_ma"
+                                if params.enable_board_ma_filter
+                                or params.enable_board_ma_exit
+                                else "",
+                                params.imported_indicator_filter_key
+                                if False
+                                else "",
+                            )
+                            if str(key).strip()
+                        )
+                    )
                 )
+                extra_indicator_keys = tuple(
+                    dict.fromkeys(
+                        [
+                            rule.indicator_key
+                            for rule in (
+                                *params.effective_imported_indicator_filters,
+                                *params.effective_imported_indicator_exits,
+                            )
+                            if rule.indicator_key.strip()
+                        ]
+                    )
+                )
+                indicator_keys = tuple(dict.fromkeys([*indicator_keys, *extra_indicator_keys]))
                 all_data = load_market_data_cached_v2(
                     source_type=params.data_source_type,
                     start_date=params.start_date,
