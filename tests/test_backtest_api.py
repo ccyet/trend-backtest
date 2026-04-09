@@ -29,6 +29,8 @@ def test_run_backtest_combined_wraps_analyzer_outputs(monkeypatch) -> None:
         "analyze_all_stocks",
         lambda all_data, params: (
             pd.DataFrame({"stock_code": ["000001.SZ"]}),
+            pd.DataFrame({"stock_code": ["000001.SZ"], "setup_pass": [True]}),
+            pd.DataFrame({"stock_code": []}),
             pd.DataFrame({"date": ["2024-01-01"]}),
             pd.DataFrame({"date": ["2024-01-01"], "net_value": [1.0]}),
             {"total_return_pct": 1.2},
@@ -64,6 +66,8 @@ def test_run_backtest_scan_mode_returns_best_scan_payload(monkeypatch) -> None:
         lambda all_data, params: (
             pd.DataFrame({"scan_id": [1], "rank": [1]}),
             pd.DataFrame({"stock_code": ["000001.SZ"]}),
+            pd.DataFrame({"stock_code": ["000001.SZ"], "setup_pass": [True]}),
+            pd.DataFrame({"stock_code": []}),
             pd.DataFrame({"date": ["2024-01-01"]}),
             pd.DataFrame({"date": ["2024-01-01"], "net_value": [1.0]}),
             {"total_return_pct": 2.5},
@@ -100,6 +104,8 @@ def test_run_backtest_per_stock_aggregates_batch_outputs(monkeypatch) -> None:
         stock_code = params.stock_codes[0]
         return (
             pd.DataFrame({"stock_code": [stock_code]}),
+            pd.DataFrame({"stock_code": [stock_code], "setup_pass": [True], "trigger_pass": [True], "filter_pass": [True]}),
+            pd.DataFrame({"stock_code": []}),
             pd.DataFrame({"date": ["2024-01-01"]}),
             pd.DataFrame({"date": ["2024-01-01"], "net_value": [1.0]}),
             {

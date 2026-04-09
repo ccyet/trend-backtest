@@ -661,6 +661,37 @@ def test_build_drawdown_diagnostics_returns_episodes_and_reason_contributors() -
     assert contributors_df.iloc[0]["entry_reason"] == "candle_run.up"
 
 
+def test_build_drawdown_diagnostics_by_batch_keeps_per_stock_isolation() -> None:
+    equity_df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-01", "2024-01-02"]),
+            "net_value": [1.0, 0.9, 1.0, 1.1],
+            "drawdown_pct": [0.0, -10.0, 0.0, 0.0],
+            "batch_stock_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],
+        }
+    )
+    strategy_df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-01"]),
+            "sell_date": pd.to_datetime(["2024-01-02"]),
+            "stock_code": ["000001.SZ"],
+            "batch_stock_code": ["000001.SZ"],
+            "entry_reason": ["trend_breakout.up"],
+            "net_return_pct": [-10.0],
+            "mfe_pct": [0.0],
+            "mae_pct": [-10.0],
+        }
+    )
+
+    episodes_df, contributors_df = analyzer.build_drawdown_diagnostics_by_batch(
+        equity_df, strategy_df
+    )
+
+    assert len(episodes_df) == 1
+    assert episodes_df.iloc[0]["batch_stock_code"] == "000001.SZ"
+    assert contributors_df.iloc[0]["batch_stock_code"] == "000001.SZ"
+
+
 def test_build_trade_anomaly_queue_flags_giveback_loss_and_stall_patterns() -> None:
     detail_df = pd.DataFrame(
         {

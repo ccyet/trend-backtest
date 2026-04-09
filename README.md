@@ -420,6 +420,7 @@ python -m unittest tests.test_app_display_formatters_unittest -v
 
 ## 9. 额外文档
 
+- `docs/backtest_workspace_release_note_2026-04-09.md`：本次回测工作台重构、signal trace 解释层和结果区增强的发布说明
 - `docs/ux_correction_plan.md`：当前工作台交互减负修正方案
 - `docs/price_morphology_research_framework.md`：日线 / 30m 价格形态数学化研究提纲、字段表、因子表与标签设计
 

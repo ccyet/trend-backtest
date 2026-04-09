@@ -242,13 +242,9 @@ def render_trade_explanations(
     board_ma_filter_threshold: float,
     imported_filter_count: int,
 ) -> None:
-    if not isinstance(detail_df, pd.DataFrame) or detail_df.empty:
-        st.info("暂无交易明细")
-        return
-
     section_header("交易明细", "表头已转中文，优先展示交易关键信息与成交明细。")
     detail_meta_cols = st.columns(3)
-    detail_meta_cols[0].metric("交易笔数", f"{len(detail_df)}")
+    detail_meta_cols[0].metric("交易笔数", f"{len(detail_df) if isinstance(detail_df, pd.DataFrame) else 0}")
     detail_meta_cols[1].metric("平均持有天数", f"{float(stats.get('avg_holding_days', 0.0)):.2f}")
     detail_meta_cols[2].metric("净收益中位数", f"{float(stats.get('median_net_return_pct', 0.0)):.2f}%")
 
@@ -336,3 +332,5 @@ def render_trade_explanations(
         st.markdown("**决策链速览**")
         st.caption("先看哪条开仓规则触发、如何成交，再看最终由哪条离场规则完成退出。")
         dataframe_stretch(decision_chain_df, hide_index=True, height=260)
+    elif not isinstance(detail_df, pd.DataFrame) or detail_df.empty:
+        st.info("当前没有形成平仓交易，可优先查看上方漏斗、被拦截信号、成交失败信号和轨迹下钻。")

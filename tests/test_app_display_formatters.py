@@ -129,3 +129,55 @@ def test_format_rejected_signal_for_display_formats_basic_columns() -> None:
     )
 
     assert list(display_df.columns) == ["信号日期", "股票代码", "入场因子", "触发价", "相对昨收跳空幅度", "拦截原因链"]
+
+
+def test_render_trade_explanations_keeps_trace_sections_without_trades() -> None:
+    signal_trace_df = pd.DataFrame(
+        [
+            {
+                "date": "2024-01-02",
+                "stock_code": "000001.SZ",
+                "entry_factor": "trend_breakout",
+                "entry_trigger_price": 10.5,
+                "setup_pass": True,
+                "setup_reason": "趋势突破 setup 成立：已生成过去窗口突破触发价",
+                "trigger_pass": True,
+                "trigger_reason": "趋势突破真实触发：当根价格突破 trigger 价",
+                "filter_pass": False,
+                "ma_filter_pass": True,
+                "atr_filter_pass": False,
+                "board_ma_filter_pass": pd.NA,
+                "imported_filter_pass": pd.NA,
+                "trade_closed": False,
+                "reject_reason_chain": "ATR过滤未通过",
+                "execution_skip_reason": "",
+            }
+        ]
+    )
+
+    results_view.render_trade_explanations(
+        signal_trace_df=signal_trace_df,
+        rejected_signal_df=pd.DataFrame(),
+        detail_df=pd.DataFrame(),
+        stats={},
+        section_header=lambda title, desc: None,
+        summarize_signal_funnel=lambda stats, df: pd.DataFrame([{"阶段": "真实触发", "数量": 1}]),
+        summarize_filter_stack=lambda **kwargs: ["趋势突破", "ATR过滤"],
+        summarize_trade_decision_chain=lambda df: pd.DataFrame(),
+        dataframe_stretch=lambda *args, **kwargs: None,
+        format_timestamp=app.format_timestamp_for_display,
+        format_number=app.format_number,
+        format_percent=app.format_percent,
+        entry_factor="trend_breakout",
+        use_ma_filter=False,
+        fast_ma_period=5,
+        slow_ma_period=20,
+        enable_atr_filter=True,
+        min_atr_filter_pct=1.0,
+        max_atr_filter_pct=5.0,
+        enable_board_ma_filter=False,
+        board_ma_filter_line="20",
+        board_ma_filter_operator=">=",
+        board_ma_filter_threshold=50.0,
+        imported_filter_count=0,
+    )

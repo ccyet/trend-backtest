@@ -421,6 +421,7 @@ def _scan_trade_candidates_with_context(
                             execution_df.loc[entry_idx, "entry_factor"] = (
                                 ESHB_ENTRY_FACTOR
                             )
+                            execution_df.loc[entry_idx, "setup_date"] = setup_time
                             execution_df.loc[entry_idx, "entry_trigger_price"] = (
                                 trigger_price
                             )
@@ -430,14 +431,17 @@ def _scan_trade_candidates_with_context(
                             trade, skip_reason = simulate_trade(
                                 execution_df, entry_idx, params, direction=direction
                             )
+                            if trade is not None:
+                                trade["setup_date"] = setup_time
             else:
                 trade, skip_reason = simulate_trade(
                     enriched, signal_idx, params, direction=direction
                 )
             if trade is None:
                 if not trace_preview.empty:
+                    trace_match_date = pd.to_datetime(enriched.iloc[signal_idx]["date"])
                     matching_mask = (
-                        pd.to_datetime(trace_preview["date"]).eq(pd.to_datetime(enriched.iloc[signal_idx]["date"]))
+                        pd.to_datetime(trace_preview["date"]).eq(trace_match_date)
                         & trace_preview["stock_code"].astype(str).eq(str(enriched.iloc[signal_idx]["stock_code"]))
                     )
                     trace_preview.loc[matching_mask, "execution_skip_reason"] = str(skip_reason or "")
@@ -469,8 +473,9 @@ def _scan_trade_candidates_with_context(
             detail_records.append(trade)
             stats["closed_trade_candidates"] += 1
             if not trace_preview.empty:
+                trade_setup_date = trade.get("setup_date", trade.get("date"))
                 matching_mask = (
-                    pd.to_datetime(trace_preview["date"]).eq(pd.to_datetime(trade["date"]))
+                    pd.to_datetime(trace_preview["date"]).eq(pd.to_datetime(trade_setup_date))
                     & trace_preview["stock_code"].astype(str).eq(str(trade["stock_code"]))
                 )
                 trace_preview.loc[matching_mask, "trade_closed"] = True
@@ -1059,6 +1064,35 @@ def build_drawdown_diagnostics(
     return episodes_df, contributors_df.loc[:, DD_CONTRIBUTOR_COLUMNS]
 
 
+def build_drawdown_diagnostics_by_batch(
+    equity_df: pd.DataFrame, strategy_df: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if equity_df.empty or "batch_stock_code" not in equity_df.columns:
+        return build_drawdown_diagnostics(equity_df, strategy_df)
+
+    episode_frames: list[pd.DataFrame] = []
+    contributor_frames: list[pd.DataFrame] = []
+    for batch_stock_code, batch_equity_df in equity_df.groupby("batch_stock_code", dropna=False):
+        batch_strategy_df = (
+            strategy_df.loc[strategy_df.get("batch_stock_code", "").astype(str) == str(batch_stock_code)].copy()
+            if isinstance(strategy_df, pd.DataFrame) and not strategy_df.empty and "batch_stock_code" in strategy_df.columns
+            else pd.DataFrame()
+        )
+        batch_episode_df, batch_contributor_df = build_drawdown_diagnostics(batch_equity_df, batch_strategy_df)
+        if not batch_episode_df.empty:
+            batch_episode_df = batch_episode_df.copy()
+            batch_episode_df["batch_stock_code"] = batch_stock_code
+            episode_frames.append(batch_episode_df)
+        if not batch_contributor_df.empty:
+            batch_contributor_df = batch_contributor_df.copy()
+            batch_contributor_df["batch_stock_code"] = batch_stock_code
+            contributor_frames.append(batch_contributor_df)
+
+    episodes_df = pd.concat(episode_frames, ignore_index=True) if episode_frames else pd.DataFrame(columns=pd.Index(DD_EPISODE_COLUMNS))
+    contributors_df = pd.concat(contributor_frames, ignore_index=True) if contributor_frames else pd.DataFrame(columns=pd.Index(DD_CONTRIBUTOR_COLUMNS))
+    return episodes_df, contributors_df
+
+
 def _partial_exit_rules(params: AnalysisParams, mode: str) -> list[PartialExitRule]:
     return [
         rule
@@ -1291,7 +1325,12 @@ def _finalize_result_bundle(
     batch_backtest_mode: str = "combined",
 ) -> BacktestResultBundle:
     trade_behavior_df = build_trade_behavior_overview(detail_df)
-    drawdown_episodes_df, drawdown_contributors_df = build_drawdown_diagnostics(
+    drawdown_builder = (
+        build_drawdown_diagnostics_by_batch
+        if batch_backtest_mode == "per_stock"
+        else build_drawdown_diagnostics
+    )
+    drawdown_episodes_df, drawdown_contributors_df = drawdown_builder(
         equity_df, detail_df
     )
     anomaly_queue_df = build_trade_anomaly_queue(detail_df, params)
