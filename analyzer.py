@@ -38,6 +38,8 @@ BASE_DETAIL_COLUMNS = [
     "profit_drawdown_ratio",
     "board_ma_value",
     "imported_indicator_exit_value",
+    "partial_indicator_rule_label",
+    "partial_indicator_trigger_value",
     "fills",
     "fill_count",
     "fill_detail_json",
@@ -263,6 +265,7 @@ def _build_scan_execution_context(
             local_data_root=params.local_data_root,
             adjust=params.adjust,
             timeframe="5m",
+            indicator_keys=params.execution_indicator_keys,
         )
         for stock_code, stock_df in execution_data.groupby("stock_code", sort=True):
             execution_by_code[str(stock_code)] = _prepare_execution_frame(

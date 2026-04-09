@@ -115,6 +115,10 @@ def _build_trade(
         "mae_pct": 0.0,
         "max_profit_pct": 0.0,
         "exit_ma_value": float("nan"),
+        "board_ma_value": float("nan"),
+        "imported_indicator_exit_value": float("nan"),
+        "partial_indicator_rule_label": "",
+        "partial_indicator_trigger_value": float("nan"),
         "profit_drawdown_ratio": float("nan"),
         "entry_factor": "trend_breakout",
         "entry_reason": "trend_breakout.up",
@@ -468,6 +472,54 @@ def test_scan_trade_candidates_supports_eshb_30m_setup_and_5m_execution(
     assert int(stats["closed_trade_candidates"]) == 1
     assert detail_df.iloc[0]["entry_factor"] == "early_surge_high_base"
     assert detail_df.iloc[0]["entry_fill_type"] == "open"
+
+
+def test_eshb_execution_loads_required_indicator_keys(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    execution_data = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-02 11:35:00"]),
+            "stock_code": ["000001.SZ"],
+            "open": [104.9],
+            "high": [105.0],
+            "low": [104.8],
+            "close": [105.0],
+            "volume": [120.0],
+            "custom_strength_score": [60.0],
+        }
+    )
+
+    def fake_load_local_parquet_data(**kwargs):
+        captured.update(kwargs)
+        return execution_data
+
+    monkeypatch.setattr(
+        analyzer, "load_local_parquet_data", fake_load_local_parquet_data
+    )
+
+    params = make_params(
+        entry_factor="early_surge_high_base",
+        timeframe="30m",
+        partial_exit_enabled=True,
+        partial_exit_count=2,
+        partial_exit_rules=(
+            analyzer.PartialExitRule(
+                True,
+                50,
+                "indicator_threshold",
+                1,
+                indicator_key="custom_strength",
+                indicator_column="custom_strength_score",
+                indicator_operator=">=",
+                indicator_threshold=50.0,
+            ),
+            analyzer.PartialExitRule(True, 50, "fixed_tp", 2, target_profit_pct=5.0),
+        ),
+    )
+
+    analyzer._build_scan_execution_context(make_market_data(), params)
+    assert captured["timeframe"] == "5m"
+    assert captured["indicator_keys"] == ("custom_strength",)
 
 
 def test_build_trade_behavior_overview_summarizes_behavior_metrics() -> None:

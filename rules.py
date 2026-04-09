@@ -6,7 +6,13 @@ from typing import Any, cast
 
 import pandas as pd
 
-from models import EPSILON, AnalysisParams, ImportedIndicatorRule, PartialExitRule, TradeFill
+from models import (
+    EPSILON,
+    AnalysisParams,
+    ImportedIndicatorRule,
+    PartialExitRule,
+    TradeFill,
+)
 
 
 SIGNAL_COLUMNS = [
@@ -128,10 +134,16 @@ def _apply_numeric_threshold_filter(
         pd.Series, pd.to_numeric(stock_df[column_name], errors="coerce")
     )
     stock_df[value_column_name] = filter_series
-    return signal_mask & filter_series.notna() & filter_series.apply(
-        lambda value: _compare_threshold(float(value), operator, threshold)
-        if pd.notna(value)
-        else False
+    return (
+        signal_mask
+        & filter_series.notna()
+        & filter_series.apply(
+            lambda value: (
+                _compare_threshold(float(value), operator, threshold)
+                if pd.notna(value)
+                else False
+            )
+        )
     )
 
 
@@ -153,6 +165,25 @@ def _resolve_numeric_threshold_exit(
     return resolved_value
 
 
+def _resolve_partial_indicator_threshold_exit(
+    day_row: pd.Series,
+    rule: PartialExitRule,
+) -> float | None:
+    column_name = str(rule.indicator_column or "").strip()
+    operator = str(rule.indicator_operator or ">=").strip() or ">="
+    if rule.indicator_threshold is None:
+        return None
+    threshold = float(rule.indicator_threshold)
+    if not column_name:
+        return None
+    return _resolve_numeric_threshold_exit(
+        day_row,
+        column_name=column_name,
+        operator=operator,
+        threshold=threshold,
+    )
+
+
 def _build_board_ma_filter_rule(params: AnalysisParams) -> NumericThresholdRule:
     return NumericThresholdRule(
         column_name=_board_ma_column_name(params.board_ma_filter_line),
@@ -162,7 +193,9 @@ def _build_board_ma_filter_rule(params: AnalysisParams) -> NumericThresholdRule:
     )
 
 
-def _build_imported_indicator_filter_rule(params: AnalysisParams) -> NumericThresholdRule:
+def _build_imported_indicator_filter_rule(
+    params: AnalysisParams,
+) -> NumericThresholdRule:
     return NumericThresholdRule(
         column_name=params.imported_indicator_filter_column,
         operator=params.imported_indicator_filter_operator,
@@ -189,7 +222,9 @@ def _build_imported_indicator_exit_rule(params: AnalysisParams) -> NumericThresh
     )
 
 
-def _build_numeric_rule(rule: ImportedIndicatorRule, value_column_name: str) -> NumericThresholdRule:
+def _build_numeric_rule(
+    rule: ImportedIndicatorRule, value_column_name: str
+) -> NumericThresholdRule:
     return NumericThresholdRule(
         column_name=rule.column,
         operator=rule.operator,
@@ -226,6 +261,7 @@ def _exit_reason_label(exit_type: str) -> str:
         "profit_drawdown_exit": "profit_drawdown_exit: 整笔利润回撤触发",
         "board_ma_exit": "board_ma_exit: 板块均线离场触发",
         "imported_indicator_exit": "imported_indicator_exit: 导入指标离场触发",
+        "indicator_threshold": "indicator_threshold: 导入指标阈值分批止盈触发",
         "ma_exit": "ma_exit: 均线离场触发",
         "atr_trailing": "atr_trailing: ATR 跟踪止盈触发",
         "time_exit": "time_exit: 时间退出触发",
@@ -861,6 +897,9 @@ def _rule_triggered(
             else day_low <= trailing_stop_price
         )
 
+    if rule.mode == "indicator_threshold":
+        return _resolve_partial_indicator_threshold_exit(day_row, rule) is not None
+
     return False
 
 
@@ -940,6 +979,8 @@ def simulate_trade(
     triggered_exit_ma_value = math.nan
     triggered_board_ma_value = math.nan
     triggered_imported_indicator_exit_value = math.nan
+    triggered_partial_indicator_value = math.nan
+    triggered_partial_indicator_label = ""
     trailing_reference_price = (
         float(signal_row["low"]) if direction == "short" else float(signal_row["high"])
     )
@@ -1050,6 +1091,7 @@ def simulate_trade(
 
                 fill_price = _apply_exit_slippage(day_close, params, direction)
                 reference_fill_price = day_close
+                fill_exit_type = rule.mode
                 if rule.mode == "fixed_tp" and rule.target_profit_ratio is not None:
                     target_price = (
                         reference_buy_price * (1.0 - rule.target_profit_ratio)
@@ -1088,13 +1130,29 @@ def simulate_trade(
                     fill_price = _apply_exit_slippage(
                         trailing_stop_price, params, direction
                     )
+                if rule.mode == "indicator_threshold":
+                    fill_exit_type = "indicator_threshold"
+                    triggered_partial_indicator_value = float(
+                        _resolve_partial_indicator_threshold_exit(day_row, rule)
+                        or math.nan
+                    )
+                    indicator_label = (
+                        str(rule.indicator_key or "").strip() or "导入指标"
+                    )
+                    indicator_column = str(rule.indicator_column or "").strip()
+                    threshold_text = (
+                        ""
+                        if rule.indicator_threshold is None
+                        else f" {rule.indicator_operator} {float(rule.indicator_threshold):g}"
+                    )
+                    triggered_partial_indicator_label = f"第{rule.priority}批 {indicator_label}.{indicator_column}{threshold_text}"
 
                 fills.append(
                     TradeFill(
                         _trade_timestamp_str(day_date, params),
                         float(fill_price),
                         float(rule_weight),
-                        rule.mode,
+                        fill_exit_type,
                         holding_days,
                     )
                 )
@@ -1409,6 +1467,10 @@ def simulate_trade(
         else math.nan,
         "imported_indicator_exit_value": float(triggered_imported_indicator_exit_value)
         if pd.notna(triggered_imported_indicator_exit_value)
+        else math.nan,
+        "partial_indicator_rule_label": triggered_partial_indicator_label,
+        "partial_indicator_trigger_value": float(triggered_partial_indicator_value)
+        if pd.notna(triggered_partial_indicator_value)
         else math.nan,
         "entry_factor": entry_factor,
         "entry_reason": _build_entry_reason(params, entry_factor),

@@ -7,6 +7,8 @@ from typing import cast
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
+import app
+
 
 def test_app_exposes_new_strategy_modes_and_intraday_timeframe_support() -> None:
     app = AppTest.from_file("app.py", default_timeout=10)
@@ -151,6 +153,32 @@ def test_app_exposes_generic_imported_indicator_filter_controls() -> None:
     assert any(label.startswith("阈值 ") for label in number_input_labels)
 
 
+def test_imported_indicator_exit_options_only_use_allow_exit() -> None:
+    registry_df = pd.DataFrame(
+        [
+            {
+                "indicator_key": "filter_only",
+                "display_name": "仅过滤",
+                "output_columns": "col_a",
+                "allow_filter": True,
+                "allow_exit": False,
+            },
+            {
+                "indicator_key": "exit_only",
+                "display_name": "仅离场",
+                "output_columns": "col_b",
+                "allow_filter": False,
+                "allow_exit": True,
+            },
+        ]
+    )
+
+    options, _, labels = app.imported_indicator_exit_options(registry_df)
+    assert "exit_only" in options
+    assert "filter_only" not in options
+    assert labels["exit_only"] == "仅离场"
+
+
 def test_app_exposes_generic_imported_indicator_exit_controls() -> None:
     app = AppTest.from_file("app.py", default_timeout=10)
     app.run()
@@ -213,6 +241,27 @@ def test_app_exposes_candle_run_acceleration_controls_and_scan_fields() -> None:
     assert "连续K线根数" in scan_axis_2.options
     assert "单根最小实体幅度" in scan_axis_2.options
     assert "组合最小累计涨跌幅" in scan_axis_2.options
+
+
+def test_app_exposes_imported_indicator_partial_exit_mode_and_controls() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    app.checkbox(key="partial_exit_enabled").set_value(True)
+    app.run()
+
+    mode_selectbox = app.selectbox(key="p_mode_1")
+    assert "导入指标阈值止盈" in mode_selectbox.options
+
+    app.selectbox(key="p_mode_1").set_value("indicator_threshold")
+    app.run()
+
+    selectbox_labels = [widget.label for widget in app.selectbox]
+    number_input_labels = [widget.label for widget in app.number_input]
+    assert "导入指标（第1批）" in selectbox_labels
+    assert "输出列（第1批）" in selectbox_labels
+    assert "比较方向（第1批）" in selectbox_labels
+    assert "阈值（第1批）" in number_input_labels
 
 
 def test_app_preserves_candle_run_acceleration_length_above_two() -> None:

@@ -155,6 +155,71 @@ def test_time_exit_case_c_fall_below_target_later():
     assert trade["fills"][-1]["holding_days"] == 3
 
 
+def test_partial_indicator_threshold_exit_triggers_before_time_exit() -> None:
+    rules = (
+        PartialExitRule(
+            True,
+            50,
+            "indicator_threshold",
+            1,
+            indicator_key="custom_strength",
+            indicator_column="custom_strength_score",
+            indicator_operator=">=",
+            indicator_threshold=50.0,
+        ),
+        PartialExitRule(True, 50, "fixed_tp", 2, target_profit_pct=10.0),
+    )
+    df = make_stock_df(
+        [
+            (100, 101, 99, 100),
+            (100, 103, 99, 102),
+            (102, 103, 100, 101),
+        ]
+    )
+    df["custom_strength_score"] = [10.0, 60.0, 40.0]
+    trade, reason = simulate_trade(
+        df,
+        0,
+        make_params(
+            partial_exit_enabled=True,
+            partial_exit_count=2,
+            partial_exit_rules=rules,
+            enable_take_profit=False,
+            stop_loss_pct=50.0,
+        ),
+    )
+    trade = require_trade(trade, reason)
+    assert trade["fills"][0]["exit_type"] == "indicator_threshold"
+    assert trade["fills"][0]["weight"] == 0.5
+    assert trade["partial_indicator_trigger_value"] == 60.0
+    assert (
+        "custom_strength.custom_strength_score >= 50"
+        in trade["partial_indicator_rule_label"]
+    )
+
+
+def test_validate_params_rejects_partial_indicator_threshold_without_column() -> None:
+    params = make_params(
+        partial_exit_enabled=True,
+        partial_exit_count=2,
+        partial_exit_rules=(
+            PartialExitRule(
+                True,
+                50,
+                "indicator_threshold",
+                1,
+                indicator_key="custom_strength",
+                indicator_column=None,
+                indicator_operator=">=",
+                indicator_threshold=50.0,
+            ),
+            PartialExitRule(True, 50, "fixed_tp", 2, target_profit_pct=5.0),
+        ),
+    )
+    errors, _ = validate_params(params)
+    assert "第 1 批导入指标阈值止盈必须选择输出列。" in errors
+
+
 def test_partial_case_d_two_batch_fixed_tp_then_ma_exit():
     rules = (
         PartialExitRule(True, 50, "fixed_tp", 1, target_profit_pct=5.0),

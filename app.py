@@ -83,6 +83,8 @@ DETAIL_PRICE_COLUMNS = [
     "sell_price",
     "exit_ma_value",
     "board_ma_value",
+    "imported_indicator_exit_value",
+    "partial_indicator_trigger_value",
 ]
 DETAIL_PERCENT_COLUMNS = [
     "gap_pct_vs_prev_close",
@@ -221,6 +223,9 @@ DETAIL_COLUMN_LABELS = {
     "max_profit_pct": "最大浮盈",
     "exit_ma_value": "离场均线值",
     "board_ma_value": "板块均线值",
+    "imported_indicator_exit_value": "导入指标离场值",
+    "partial_indicator_rule_label": "分批指标止盈说明",
+    "partial_indicator_trigger_value": "分批指标触发值",
     "profit_drawdown_ratio": "利润回撤比例",
     "fill_count": "成交批次数",
     "fill_detail_json": "成交明细",
@@ -248,6 +253,7 @@ PARTIAL_EXIT_MODE_LABELS = {
     "ma_exit": "均线离场",
     "profit_drawdown": "利润回撤",
     "atr_trailing": "ATR 跟踪止盈",
+    "indicator_threshold": "导入指标阈值止盈",
 }
 BACKTEST_RANGE_PRESETS = (
     ("10年至今", 10),
@@ -1577,6 +1583,11 @@ def build_detail_column_config() -> dict[str, object]:
         "最大不利波动": st.column_config.TextColumn("最大不利波动", width="small"),
         "成交明细": st.column_config.TextColumn("成交明细", width="large"),
         "板块均线值": st.column_config.TextColumn("板块均线值", width="small"),
+        "导入指标离场值": st.column_config.TextColumn("导入指标离场值", width="small"),
+        "分批指标止盈说明": st.column_config.TextColumn(
+            "分批指标止盈说明", width="large"
+        ),
+        "分批指标触发值": st.column_config.TextColumn("分批指标触发值", width="small"),
     }
 
 
@@ -1779,7 +1790,9 @@ def format_indicator_registry_for_display(preview_df: pd.DataFrame) -> pd.DataFr
     bool_columns = ["allow_scan", "allow_filter", "allow_exit"]
     for column in bool_columns:
         if column in display_df.columns:
-            display_df[column] = display_df[column].map(lambda value: "是" if bool(value) else "否")
+            display_df[column] = display_df[column].map(
+                lambda value: "是" if bool(value) else "否"
+            )
     return display_df.rename(
         columns={
             "indicator_key": "指标Key",
@@ -1804,10 +1817,14 @@ def format_indicator_availability_for_display(preview_df: pd.DataFrame) -> pd.Da
         return preview_df
     display_df = preview_df.copy()
     if "updated_at" in display_df.columns:
-        display_df["updated_at"] = pd.to_datetime(display_df["updated_at"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+        display_df["updated_at"] = pd.to_datetime(
+            display_df["updated_at"], errors="coerce"
+        ).dt.strftime("%Y-%m-%d %H:%M")
     for column in ("symbols", "rows"):
         if column in display_df.columns:
-            display_df[column] = display_df[column].map(lambda value: f"{int(value):,}" if pd.notna(value) else "")
+            display_df[column] = display_df[column].map(
+                lambda value: f"{int(value):,}" if pd.notna(value) else ""
+            )
     return display_df.rename(
         columns={
             "indicator_key": "指标Key",
@@ -1839,12 +1856,13 @@ def format_indicator_quality_for_display(preview_df: pd.DataFrame) -> pd.DataFra
     )
 
 
-def imported_indicator_filter_options(
+def imported_indicator_options_by_capability(
     registry_df: pd.DataFrame,
+    capability_column: str,
 ) -> tuple[list[str], dict[str, list[str]], dict[str, str]]:
     if registry_df.empty:
         return [""], {}, {}
-    filtered = registry_df.loc[registry_df["allow_filter"].astype(bool)].copy()
+    filtered = registry_df.loc[registry_df[capability_column].astype(bool)].copy()
     if filtered.empty:
         return [""], {}, {}
     key_to_columns: dict[str, list[str]] = {}
@@ -1863,6 +1881,18 @@ def imported_indicator_filter_options(
         key_to_columns[indicator_key] = output_columns
         ordered_keys.append(indicator_key)
     return ordered_keys, key_to_columns, key_to_label
+
+
+def imported_indicator_filter_options(
+    registry_df: pd.DataFrame,
+) -> tuple[list[str], dict[str, list[str]], dict[str, str]]:
+    return imported_indicator_options_by_capability(registry_df, "allow_filter")
+
+
+def imported_indicator_exit_options(
+    registry_df: pd.DataFrame,
+) -> tuple[list[str], dict[str, list[str]], dict[str, str]]:
+    return imported_indicator_options_by_capability(registry_df, "allow_exit")
 
 
 def build_imported_indicator_rules(
@@ -1897,6 +1927,21 @@ def build_imported_indicator_rules(
             )
         )
     return tuple(rules)
+
+
+def build_partial_indicator_rule(index: int) -> dict[str, Any]:
+    return {
+        "indicator_key": str(st.session_state.get(f"p_indicator_key_{index}", "")),
+        "indicator_column": str(
+            st.session_state.get(f"p_indicator_column_{index}", "")
+        ),
+        "indicator_operator": str(
+            st.session_state.get(f"p_indicator_operator_{index}", ">=")
+        ),
+        "indicator_threshold": float(
+            st.session_state.get(f"p_indicator_threshold_{index}", 0.0)
+        ),
+    }
 
 
 def format_local_inventory_for_display(preview_df: pd.DataFrame) -> pd.DataFrame:
@@ -2387,7 +2432,9 @@ with st.sidebar.expander("数据准备", expanded=False):
             index=0,
             key="offline_indicator_adjust",
         )
-        st.caption("当前 registry 已区分 market_native / tdx_formula_local / computed_feature。")
+        st.caption(
+            "当前 registry 已区分 market_native / tdx_formula_local / computed_feature。"
+        )
 
     selected_indicator_key = "board_ma"
     manual_formula_name = ""
@@ -3143,7 +3190,8 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
                     if str(value) == ""
                     else imported_filter_labels.get(str(value), str(value))
                 ),
-                disabled=(not imported_filter_rule_enabled) or len(imported_filter_options) <= 1,
+                disabled=(not imported_filter_rule_enabled)
+                or len(imported_filter_options) <= 1,
                 key=f"imported_filter_key_{rule_index}",
             )
             selected_imported_columns = imported_filter_columns.get(
@@ -3153,8 +3201,11 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
                 f"输出列 {rule_index}",
                 options=selected_imported_columns or [""],
                 index=0,
-                format_func=lambda value: "请选择输出列" if str(value) == "" else str(value),
-                disabled=(not imported_filter_rule_enabled) or not selected_imported_columns,
+                format_func=lambda value: (
+                    "请选择输出列" if str(value) == "" else str(value)
+                ),
+                disabled=(not imported_filter_rule_enabled)
+                or not selected_imported_columns,
                 key=f"imported_filter_column_{rule_index}",
             )
             imported_filter_cols[3].selectbox(
@@ -3171,12 +3222,16 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
             )
             imported_filter_cols[4].number_input(
                 f"阈值 {rule_index}",
-                value=float(factor_control_default("imported_indicator_filter_threshold")),
+                value=float(
+                    factor_control_default("imported_indicator_filter_threshold")
+                ),
                 step=0.1,
                 disabled=not imported_filter_rule_enabled,
                 key=f"imported_filter_threshold_{rule_index}",
             )
-        st.caption("导入指标过滤会在主入场信号生成后追加筛选；当前第一版支持单个指标单列阈值过滤。")
+        st.caption(
+            "导入指标过滤会在主入场信号生成后追加筛选；当前第一版支持单个指标单列阈值过滤。"
+        )
 
     with core_exit_col:
         st.markdown("**退出与风控**")
@@ -3253,7 +3308,7 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
         )
         imported_exit_registry = load_indicator_registry_preview()
         imported_exit_options, imported_exit_columns, imported_exit_labels = (
-            imported_indicator_filter_options(imported_exit_registry)
+            imported_indicator_exit_options(imported_exit_registry)
         )
         st.markdown("**导入指标离场（整笔）**")
         enable_imported_indicator_exit = st.checkbox(
@@ -3276,7 +3331,8 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
                     if str(value) == ""
                     else imported_exit_labels.get(str(value), str(value))
                 ),
-                disabled=(not imported_exit_rule_enabled) or len(imported_exit_options) <= 1,
+                disabled=(not imported_exit_rule_enabled)
+                or len(imported_exit_options) <= 1,
                 key=f"imported_exit_key_{rule_index}",
             )
             selected_imported_exit_columns = imported_exit_columns.get(
@@ -3286,8 +3342,11 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
                 f"离场输出列 {rule_index}",
                 options=selected_imported_exit_columns or [""],
                 index=0,
-                format_func=lambda value: "请选择输出列" if str(value) == "" else str(value),
-                disabled=(not imported_exit_rule_enabled) or not selected_imported_exit_columns,
+                format_func=lambda value: (
+                    "请选择输出列" if str(value) == "" else str(value)
+                ),
+                disabled=(not imported_exit_rule_enabled)
+                or not selected_imported_exit_columns,
                 key=f"imported_exit_column_{rule_index}",
             )
             imported_exit_cols[3].selectbox(
@@ -3304,12 +3363,16 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
             )
             imported_exit_cols[4].number_input(
                 f"离场阈值 {rule_index}",
-                value=float(factor_control_default("imported_indicator_exit_threshold")),
+                value=float(
+                    factor_control_default("imported_indicator_exit_threshold")
+                ),
                 step=0.1,
                 disabled=not imported_exit_rule_enabled,
                 key=f"imported_exit_threshold_{rule_index}",
             )
-        st.caption("导入指标离场按整笔退出处理，但只作用于当时剩余仓位；若同 bar 已先发生分批退出，则只平掉剩余部分。")
+        st.caption(
+            "导入指标离场按整笔退出处理，但只作用于当时剩余仓位；若同 bar 已先发生分批退出，则只平掉剩余部分。"
+        )
         ma_exit_cols = st.columns(2)
         enable_ma_exit = ma_exit_cols[0].checkbox("启用均线离场（整笔）", value=False)
         exit_ma_period = ma_exit_cols[1].number_input(
@@ -3397,6 +3460,12 @@ with advanced_cols[0]:
             disabled=not partial_exit_enabled,
         )
         partial_rule_inputs = []
+        partial_indicator_registry = load_indicator_registry_preview()
+        (
+            partial_indicator_options,
+            partial_indicator_columns,
+            partial_indicator_labels,
+        ) = imported_indicator_exit_options(partial_indicator_registry)
         batch_tabs = st.tabs(
             [f"第 {i} 批" for i in range(1, int(partial_exit_count) + 1)]
         )
@@ -3411,6 +3480,13 @@ with advanced_cols[0]:
                     if int(partial_exit_count) == 2
                     else ["fixed_tp", "fixed_tp", "ma_exit"][i - 1]
                 )
+                mode_options = [
+                    "fixed_tp",
+                    "ma_exit",
+                    "profit_drawdown",
+                    "atr_trailing",
+                    "indicator_threshold",
+                ]
                 weight_pct = c1.number_input(
                     f"仓位比例（第{i}批）",
                     min_value=0.0,
@@ -3431,13 +3507,8 @@ with advanced_cols[0]:
                 )
                 mode = c2.selectbox(
                     f"退出方式（第{i}批）",
-                    options=["fixed_tp", "ma_exit", "profit_drawdown", "atr_trailing"],
-                    index=[
-                        "fixed_tp",
-                        "ma_exit",
-                        "profit_drawdown",
-                        "atr_trailing",
-                    ].index(mode_default),
+                    options=mode_options,
+                    index=mode_options.index(mode_default),
                     format_func=lambda value: str(
                         PARTIAL_EXIT_MODE_LABELS.get(value, value) or value
                     ),
@@ -3491,6 +3562,54 @@ with advanced_cols[0]:
                     disabled=(not partial_exit_enabled) or mode != "atr_trailing",
                     key=f"p_atr_multiplier_{i}",
                 )
+                indicator_selector_cols = st.columns([1.3, 1.4, 1, 1])
+                partial_indicator_key = indicator_selector_cols[0].selectbox(
+                    f"导入指标（第{i}批）",
+                    options=partial_indicator_options,
+                    index=0,
+                    format_func=lambda value: (
+                        "请选择指标"
+                        if str(value) == ""
+                        else partial_indicator_labels.get(str(value), str(value))
+                    ),
+                    disabled=(not partial_exit_enabled)
+                    or mode != "indicator_threshold",
+                    key=f"p_indicator_key_{i}",
+                )
+                selected_partial_indicator_columns = partial_indicator_columns.get(
+                    str(partial_indicator_key), []
+                )
+                indicator_selector_cols[1].selectbox(
+                    f"输出列（第{i}批）",
+                    options=selected_partial_indicator_columns or [""],
+                    index=0,
+                    format_func=lambda value: (
+                        "请选择输出列" if str(value) == "" else str(value)
+                    ),
+                    disabled=(not partial_exit_enabled)
+                    or mode != "indicator_threshold"
+                    or not selected_partial_indicator_columns,
+                    key=f"p_indicator_column_{i}",
+                )
+                indicator_selector_cols[2].selectbox(
+                    f"比较方向（第{i}批）",
+                    options=[">=", "<="],
+                    index=0,
+                    format_func=lambda value: IMPORTED_INDICATOR_OPERATOR_LABELS.get(
+                        str(value), str(value)
+                    ),
+                    disabled=(not partial_exit_enabled)
+                    or mode != "indicator_threshold",
+                    key=f"p_indicator_operator_{i}",
+                )
+                indicator_selector_cols[3].number_input(
+                    f"阈值（第{i}批）",
+                    value=0.0,
+                    step=0.1,
+                    disabled=(not partial_exit_enabled)
+                    or mode != "indicator_threshold",
+                    key=f"p_indicator_threshold_{i}",
+                )
                 partial_rule_inputs.append(
                     {
                         "enabled": bool(partial_exit_enabled),
@@ -3511,6 +3630,16 @@ with advanced_cols[0]:
                         "atr_multiplier": float(atr_multiplier)
                         if mode == "atr_trailing"
                         else None,
+                        **(
+                            build_partial_indicator_rule(i)
+                            if mode == "indicator_threshold"
+                            else {
+                                "indicator_key": None,
+                                "indicator_column": None,
+                                "indicator_operator": None,
+                                "indicator_threshold": None,
+                            }
+                        ),
                     }
                 )
 
@@ -3682,10 +3811,24 @@ if submitted:
         board_ma_filter_operator=str(board_ma_filter_operator),
         board_ma_filter_threshold=float(board_ma_filter_threshold),
         enable_imported_indicator_filter=bool(enable_imported_indicator_filter),
-        imported_indicator_filter_key=str(st.session_state.get("imported_filter_key_1", "")),
-        imported_indicator_filter_column=str(st.session_state.get("imported_filter_column_1", "")),
-        imported_indicator_filter_operator=str(st.session_state.get("imported_filter_operator_1", factor_control_default("imported_indicator_filter_operator"))),
-        imported_indicator_filter_threshold=float(st.session_state.get("imported_filter_threshold_1", factor_control_default("imported_indicator_filter_threshold"))),
+        imported_indicator_filter_key=str(
+            st.session_state.get("imported_filter_key_1", "")
+        ),
+        imported_indicator_filter_column=str(
+            st.session_state.get("imported_filter_column_1", "")
+        ),
+        imported_indicator_filter_operator=str(
+            st.session_state.get(
+                "imported_filter_operator_1",
+                factor_control_default("imported_indicator_filter_operator"),
+            )
+        ),
+        imported_indicator_filter_threshold=float(
+            st.session_state.get(
+                "imported_filter_threshold_1",
+                factor_control_default("imported_indicator_filter_threshold"),
+            )
+        ),
         imported_indicator_filters=imported_filter_rules,
         time_stop_days=int(time_stop_days),
         time_stop_target_pct=float(time_stop_target_pct),
@@ -3702,10 +3845,24 @@ if submitted:
         board_ma_exit_operator=str(board_ma_exit_operator),
         board_ma_exit_threshold=float(board_ma_exit_threshold),
         enable_imported_indicator_exit=bool(enable_imported_indicator_exit),
-        imported_indicator_exit_key=str(st.session_state.get("imported_exit_key_1", "")),
-        imported_indicator_exit_column=str(st.session_state.get("imported_exit_column_1", "")),
-        imported_indicator_exit_operator=str(st.session_state.get("imported_exit_operator_1", factor_control_default("imported_indicator_exit_operator"))),
-        imported_indicator_exit_threshold=float(st.session_state.get("imported_exit_threshold_1", factor_control_default("imported_indicator_exit_threshold"))),
+        imported_indicator_exit_key=str(
+            st.session_state.get("imported_exit_key_1", "")
+        ),
+        imported_indicator_exit_column=str(
+            st.session_state.get("imported_exit_column_1", "")
+        ),
+        imported_indicator_exit_operator=str(
+            st.session_state.get(
+                "imported_exit_operator_1",
+                factor_control_default("imported_indicator_exit_operator"),
+            )
+        ),
+        imported_indicator_exit_threshold=float(
+            st.session_state.get(
+                "imported_exit_threshold_1",
+                factor_control_default("imported_indicator_exit_threshold"),
+            )
+        ),
         imported_indicator_exits=imported_exit_rules,
         enable_ma_exit=bool(enable_ma_exit),
         exit_ma_period=int(exit_ma_period),
@@ -3763,21 +3920,17 @@ if submitted:
     else:
         try:
             with st.spinner("正在运行回测，请稍候..."):
-                indicator_keys: tuple[str, ...] = (
-                    tuple(
-                        dict.fromkeys(
-                            key
-                            for key in (
-                                "board_ma"
-                                if params.enable_board_ma_filter
-                                or params.enable_board_ma_exit
-                                else "",
-                                params.imported_indicator_filter_key
-                                if False
-                                else "",
-                            )
-                            if str(key).strip()
+                indicator_keys: tuple[str, ...] = tuple(
+                    dict.fromkeys(
+                        key
+                        for key in (
+                            "board_ma"
+                            if params.enable_board_ma_filter
+                            or params.enable_board_ma_exit
+                            else "",
+                            params.imported_indicator_filter_key if False else "",
                         )
+                        if str(key).strip()
                     )
                 )
                 extra_indicator_keys = tuple(
@@ -3792,7 +3945,16 @@ if submitted:
                         ]
                     )
                 )
-                indicator_keys = tuple(dict.fromkeys([*indicator_keys, *extra_indicator_keys]))
+                partial_indicator_keys = params.partial_exit_indicator_keys
+                indicator_keys = tuple(
+                    dict.fromkeys(
+                        [
+                            *indicator_keys,
+                            *extra_indicator_keys,
+                            *partial_indicator_keys,
+                        ]
+                    )
+                )
                 all_data = load_market_data_cached_v2(
                     source_type=params.data_source_type,
                     start_date=params.start_date,
@@ -4047,9 +4209,12 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
                 "最长水下周期",
                 f"{int(drawdown_episodes_df['underwater_bars'].max())}",
             )
+            deepest_drawdown_row = drawdown_episodes_df.sort_values(
+                ["peak_to_trough_pct", "episode_no"], ascending=[False, True]
+            ).iloc[0]
             dd_metric_cols[3].metric(
                 "最大回撤主导原因",
-                str(drawdown_episodes_df.iloc[0]["dominant_entry_reason"] or "-"),
+                str(deepest_drawdown_row.get("dominant_entry_reason", "") or "-"),
             )
             dd_cols = st.columns(2)
             with dd_cols[0]:

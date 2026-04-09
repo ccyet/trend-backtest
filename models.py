@@ -228,6 +228,10 @@ class PartialExitRule:
     min_profit_to_activate_drawdown: float | None = None
     atr_period: int | None = None
     atr_multiplier: float | None = None
+    indicator_key: str | None = None
+    indicator_column: str | None = None
+    indicator_operator: str | None = None
+    indicator_threshold: float | None = None
 
     @property
     def weight_ratio(self) -> float:
@@ -420,7 +424,9 @@ class AnalysisParams:
 
     @property
     def effective_imported_indicator_filters(self) -> tuple[ImportedIndicatorRule, ...]:
-        enabled_rules = tuple(rule for rule in self.imported_indicator_filters if rule.enabled)
+        enabled_rules = tuple(
+            rule for rule in self.imported_indicator_filters if rule.enabled
+        )
         if enabled_rules:
             return enabled_rules
         if not self.enable_imported_indicator_filter:
@@ -438,7 +444,9 @@ class AnalysisParams:
 
     @property
     def effective_imported_indicator_exits(self) -> tuple[ImportedIndicatorRule, ...]:
-        enabled_rules = tuple(rule for rule in self.imported_indicator_exits if rule.enabled)
+        enabled_rules = tuple(
+            rule for rule in self.imported_indicator_exits if rule.enabled
+        )
         if enabled_rules:
             return tuple(sorted(enabled_rules, key=lambda rule: rule.priority))
         if not self.enable_imported_indicator_exit:
@@ -507,6 +515,29 @@ class AnalysisParams:
     @property
     def required_lookahead_days(self) -> int:
         return self.time_stop_days + 5
+
+    @property
+    def partial_exit_indicator_keys(self) -> tuple[str, ...]:
+        keys = {
+            str(rule.indicator_key).strip()
+            for rule in self.partial_exit_rules
+            if rule.enabled
+            and rule.mode == "indicator_threshold"
+            and str(rule.indicator_key or "").strip()
+        }
+        return tuple(sorted(keys))
+
+    @property
+    def execution_indicator_keys(self) -> tuple[str, ...]:
+        keys: set[str] = set(self.partial_exit_indicator_keys)
+        if self.enable_board_ma_exit:
+            keys.add("board_ma")
+        keys.update(
+            str(rule.indicator_key).strip()
+            for rule in self.effective_imported_indicator_exits
+            if str(rule.indicator_key).strip()
+        )
+        return tuple(sorted(keys))
 
 
 def normalize_stock_codes(raw_text: str) -> tuple[str, ...]:
@@ -745,7 +776,13 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
         if len(priorities) != len(set(priorities)):
             errors.append("启用分批止盈时，每批 priority 必须唯一。")
 
-        valid_modes = {"fixed_tp", "ma_exit", "profit_drawdown", "atr_trailing"}
+        valid_modes = {
+            "fixed_tp",
+            "ma_exit",
+            "profit_drawdown",
+            "atr_trailing",
+            "indicator_threshold",
+        }
         for index, rule in enumerate(enabled_rules, start=1):
             if rule.mode not in valid_modes:
                 errors.append(f"第 {index} 批退出方式不合法。")
@@ -791,6 +828,18 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
                 elif rule.atr_multiplier <= 0:
                     errors.append(f"第 {index} 批 atr_trailing ATR 倍数必须大于 0。")
 
+            if rule.mode == "indicator_threshold":
+                if not str(rule.indicator_key or "").strip():
+                    errors.append(f"第 {index} 批导入指标阈值止盈必须选择指标。")
+                if not str(rule.indicator_column or "").strip():
+                    errors.append(f"第 {index} 批导入指标阈值止盈必须选择输出列。")
+                if str(rule.indicator_operator or "").strip() not in {">=", "<="}:
+                    errors.append(
+                        f"第 {index} 批导入指标阈值止盈比较方向仅支持 >= 或 <=。"
+                    )
+                if rule.indicator_threshold is None:
+                    errors.append(f"第 {index} 批导入指标阈值止盈必须填写阈值。")
+
     if params.time_stop_days < 1:
         errors.append("启用时间退出时，time_stop_days 必须大于等于 1。")
 
@@ -827,10 +876,16 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
     ):
         errors.append("ATR 波动过滤下限不能大于上限。")
 
-    if params.enable_board_ma_filter and params.board_ma_filter_line not in {"20", "50"}:
+    if params.enable_board_ma_filter and params.board_ma_filter_line not in {
+        "20",
+        "50",
+    }:
         errors.append("板块均线开仓过滤仅支持 20 或 50 日占比。")
 
-    if params.enable_board_ma_filter and params.board_ma_filter_operator not in {">=", "<="}:
+    if params.enable_board_ma_filter and params.board_ma_filter_operator not in {
+        ">=",
+        "<=",
+    }:
         errors.append("板块均线开仓过滤比较方向仅支持 >= 或 <=。")
 
     if params.enable_board_ma_filter and params.board_ma_filter_threshold < 0:
@@ -858,7 +913,10 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
     if params.enable_board_ma_exit and params.board_ma_exit_line not in {"20", "50"}:
         errors.append("板块均线离场仅支持 20 或 50 日占比。")
 
-    if params.enable_board_ma_exit and params.board_ma_exit_operator not in {">=", "<="}:
+    if params.enable_board_ma_exit and params.board_ma_exit_operator not in {
+        ">=",
+        "<=",
+    }:
         errors.append("板块均线离场比较方向仅支持 >= 或 <=。")
 
     if params.enable_board_ma_exit and params.board_ma_exit_threshold < 0:
