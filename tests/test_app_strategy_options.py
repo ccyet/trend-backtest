@@ -21,7 +21,15 @@ def test_app_exposes_new_strategy_modes_and_intraday_timeframe_support() -> None
 
     timeframe = app.selectbox(key="timeframe")
     assert timeframe.label == "周期"
-    assert timeframe.options == ["1d", "30m", "15m", "5m"]
+    assert timeframe.options == ["1d"]
+
+    app.selectbox(key="entry_factor").set_value("early_surge_high_base")
+    app.run()
+    timeframe = app.selectbox(key="timeframe")
+    assert timeframe.options == ["30m"]
+
+    app.radio(key="page_mode").set_value("数据准备页")
+    app.run()
 
     update_timeframe = app.multiselect(key="offline_update_timeframe")
     assert update_timeframe.options == ["1d", "30m", "15m", "5m"]
@@ -40,7 +48,7 @@ def test_app_exposes_new_strategy_modes_and_intraday_timeframe_support() -> None
 
     captions = [caption.value for caption in app.caption]
     assert (
-        "1d 为常规日线；early_surge_high_base 使用 30m 形态并自动切换到 5m 执行。"
+        "当前支持按周期分别选择 AKShare / TDX 更新源；当前更新链路已覆盖 1d / 30m / 15m / 5m。"
         in captions
     )
     assert (
@@ -64,6 +72,22 @@ def test_app_updates_direction_options_for_acceleration_mode() -> None:
         "连续K线追势基于前序连续阳线/阴线组合；加速模式额外要求实体强度逐步增强。"
         in captions
     )
+
+
+def test_app_exposes_data_prep_page_entry() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    assert app.button(key="goto_data_prep").label == "进入数据准备页"
+    app.button(key="goto_data_prep").click()
+    app.run()
+
+    assert app.radio(key="page_mode").value == "数据准备页"
+    assert app.button(key="offline_update_submit").label == "开始更新本地数据"
+    app.radio(key="page_mode").set_value("回测工作台")
+    app.run()
+    assert app.radio(key="page_mode").value == "回测工作台"
+    assert app.button(key="run_backtest").label == "开始回测"
 
 
 def test_app_exposes_candle_run_specific_controls_and_scan_fields() -> None:
@@ -92,6 +116,14 @@ def test_app_exposes_candle_run_specific_controls_and_scan_fields() -> None:
     assert "连续K线根数" in scan_axis_2.options
     assert "单根最小实体幅度" in scan_axis_2.options
     assert "组合最小累计涨跌幅" in scan_axis_2.options
+
+
+def test_app_marks_time_exit_as_always_on_basic_rule() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    captions = [caption.value for caption in app.caption]
+    assert "时间退出为基础规则，当前版本始终生效。" in captions
 
 
 def test_app_exposes_atr_filter_and_trailing_controls() -> None:
@@ -362,6 +394,8 @@ def test_app_exposes_data_prep_shortcuts_and_applies_to_update_inputs() -> None:
 
     app = AppTest.from_file("app.py", default_timeout=10)
     app.run()
+    app.radio(key="page_mode").set_value("数据准备页")
+    app.run()
 
     app.button(key="offline_update_symbol_preset_hs300").click()
     app.run()
@@ -406,6 +440,8 @@ def test_app_passes_tdx_tqcenter_path_to_update_subprocess(
     monkeypatch.setattr("subprocess.run", _fake_run)
 
     app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+    app.radio(key="page_mode").set_value("数据准备页")
     app.run()
 
     install_root = str(tmp_path / "TdxInstall")
@@ -461,6 +497,8 @@ def test_app_passes_tdx_tqcenter_path_to_indicator_import_subprocess(
 
     app = AppTest.from_file("app.py", default_timeout=10)
     app.run()
+    app.radio(key="page_mode").set_value("数据准备页")
+    app.run()
 
     install_root = str(tmp_path / "TdxInstall")
     app.session_state["tdx_tqcenter_path"] = install_root
@@ -495,6 +533,8 @@ def test_app_indicator_probe_shows_manual_fallback_message(
 
     app = AppTest.from_file("app.py", default_timeout=10)
     app.run()
+    app.radio(key="page_mode").set_value("数据准备页")
+    app.run()
     app.session_state["tdx_tqcenter_path"] = str(tmp_path / "TdxInstall")
     app.button(key="offline_indicator_probe").click()
     app.run()
@@ -521,6 +561,8 @@ def test_app_passes_manual_formula_mapping_to_indicator_import(
     monkeypatch.setattr("subprocess.run", _fake_run)
 
     app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+    app.radio(key="page_mode").set_value("数据准备页")
     app.run()
     app.session_state["tdx_tqcenter_path"] = str(tmp_path / "TdxInstall")
     app.session_state["tdx_tqcenter_path_display"] = str(tmp_path / "TdxInstall")

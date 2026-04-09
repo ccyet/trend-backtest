@@ -175,7 +175,7 @@ def test_scan_trade_candidates_propagates_skip_counters_and_entry_fields(
     monkeypatch.setattr(analyzer, "apply_gap_filters", fake_apply_gap_filters)
     monkeypatch.setattr(analyzer, "simulate_trade", fake_simulate_trade)
 
-    detail_df, stats = analyzer.scan_trade_candidates(make_market_data(), make_params())
+    detail_df, signal_trace_df, rejected_signal_df, stats = analyzer.scan_trade_candidates(make_market_data(), make_params())
 
     assert stats["signal_count"] == 4
     assert stats["closed_trade_candidates"] == 2
@@ -189,6 +189,8 @@ def test_scan_trade_candidates_propagates_skip_counters_and_entry_fields(
     assert "exit_reason" in detail_df.columns
     assert set(detail_df["entry_factor"]) == {"trend_breakout"}
     assert set(detail_df["entry_fill_type"]) == {"open", "trigger"}
+    assert not signal_trace_df.empty
+    assert rejected_signal_df.empty
 
 
 def test_scan_trade_candidates_keeps_date_stock_sell_date_sort_order(
@@ -234,7 +236,7 @@ def test_scan_trade_candidates_keeps_date_stock_sell_date_sort_order(
     monkeypatch.setattr(analyzer, "apply_gap_filters", fake_apply_gap_filters)
     monkeypatch.setattr(analyzer, "simulate_trade", fake_simulate_trade)
 
-    detail_df, _ = analyzer.scan_trade_candidates(make_market_data(), make_params())
+    detail_df, _, _, _ = analyzer.scan_trade_candidates(make_market_data(), make_params())
 
     observed = detail_df[["date", "stock_code", "sell_date"]].copy()
     observed["date"] = pd.Series(pd.to_datetime(observed["date"])).map(
@@ -257,9 +259,11 @@ def test_scan_trade_candidates_keeps_date_stock_sell_date_sort_order(
 
 
 def test_empty_scan_stats_include_new_skip_counters() -> None:
-    detail_df, stats = analyzer.scan_trade_candidates(pd.DataFrame(), make_params())
+    detail_df, signal_trace_df, rejected_signal_df, stats = analyzer.scan_trade_candidates(pd.DataFrame(), make_params())
 
     assert detail_df.empty
+    assert signal_trace_df.empty
+    assert rejected_signal_df.empty
     assert stats["skipped_entry_not_filled"] == 0
     assert stats["skipped_locked_bar_unfillable"] == 0
 
@@ -278,7 +282,7 @@ def test_analyze_all_stocks_supports_candle_run_strategy_level_stats() -> None:
             "volume": [1000.0, 1200.0, 1100.0, 1300.0],
         }
     )
-    detail_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
+    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
         market_data,
         make_params(
             entry_factor="candle_run",
@@ -289,6 +293,8 @@ def test_analyze_all_stocks_supports_candle_run_strategy_level_stats() -> None:
     )
 
     assert len(detail_df) == 1
+    assert not signal_trace_df.empty
+    assert rejected_signal_df.empty
     assert not daily_df.empty
     assert not equity_df.empty
     assert detail_df.iloc[0]["entry_factor"] == "candle_run"
@@ -311,7 +317,7 @@ def test_analyze_all_stocks_supports_short_candle_run_strategy_level_stats() -> 
             "volume": [1000.0, 1100.0, 1200.0, 1250.0],
         }
     )
-    detail_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
+    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
         market_data,
         make_params(
             gap_direction="down",
@@ -323,6 +329,8 @@ def test_analyze_all_stocks_supports_short_candle_run_strategy_level_stats() -> 
     )
 
     assert len(detail_df) == 1
+    assert not signal_trace_df.empty
+    assert rejected_signal_df.empty
     assert not daily_df.empty
     assert not equity_df.empty
     assert detail_df.iloc[0]["entry_factor"] == "candle_run"
@@ -347,7 +355,7 @@ def test_analyze_all_stocks_supports_candle_run_acceleration_strategy_level_stat
             "volume": [1000.0, 1100.0, 1200.0, 1300.0],
         }
     )
-    detail_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
+    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
         market_data,
         make_params(
             entry_factor="candle_run_acceleration",
@@ -358,6 +366,8 @@ def test_analyze_all_stocks_supports_candle_run_acceleration_strategy_level_stat
     )
 
     assert len(detail_df) == 1
+    assert not signal_trace_df.empty
+    assert rejected_signal_df.empty
     assert not daily_df.empty
     assert not equity_df.empty
     assert detail_df.iloc[0]["entry_factor"] == "candle_run_acceleration"
@@ -382,7 +392,7 @@ def test_analyze_all_stocks_supports_short_candle_run_acceleration_strategy_leve
             "volume": [1000.0, 1100.0, 1200.0, 1300.0],
         }
     )
-    detail_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
+    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
         market_data,
         make_params(
             gap_direction="down",
@@ -394,6 +404,8 @@ def test_analyze_all_stocks_supports_short_candle_run_acceleration_strategy_leve
     )
 
     assert len(detail_df) == 1
+    assert not signal_trace_df.empty
+    assert rejected_signal_df.empty
     assert not daily_df.empty
     assert not equity_df.empty
     assert detail_df.iloc[0]["entry_factor"] == "candle_run_acceleration"
@@ -445,7 +457,7 @@ def test_scan_trade_candidates_supports_eshb_30m_setup_and_5m_execution(
 
     monkeypatch.setattr(analyzer, "load_local_parquet_data", lambda **_: execution_data)
 
-    detail_df, stats = analyzer.scan_trade_candidates(
+    detail_df, signal_trace_df, rejected_signal_df, stats = analyzer.scan_trade_candidates(
         setup_data,
         make_params(
             entry_factor="early_surge_high_base",
@@ -470,8 +482,70 @@ def test_scan_trade_candidates_supports_eshb_30m_setup_and_5m_execution(
     assert len(detail_df) == 1
     assert int(stats["signal_count"]) == 1
     assert int(stats["closed_trade_candidates"]) == 1
+    assert not signal_trace_df.empty
+    assert rejected_signal_df.empty
     assert detail_df.iloc[0]["entry_factor"] == "early_surge_high_base"
     assert detail_df.iloc[0]["entry_fill_type"] == "open"
+
+
+def test_scan_trade_candidates_keeps_rejected_signal_reason_chain(monkeypatch) -> None:
+    market_data = make_market_data()
+
+    def fake_apply_gap_filters(
+        stock_df: pd.DataFrame, _params: AnalysisParams
+    ) -> pd.DataFrame:
+        enriched = stock_df.sort_values("date").reset_index(drop=True).copy()
+        enriched["entry_factor"] = "trend_breakout"
+        enriched["entry_trigger_price"] = [pd.NA] * len(enriched)
+        enriched["gap_pct_vs_prev_close"] = [0.0] * len(enriched)
+        enriched["core_signal_pass"] = [False, True]
+        enriched["filter_pass"] = [False, False]
+        enriched["reject_reason_chain"] = ["", "快慢线过滤未通过"]
+        enriched["is_signal"] = [False, False]
+        return enriched
+
+    monkeypatch.setattr(analyzer, "apply_gap_filters", fake_apply_gap_filters)
+
+    detail_df, signal_trace_df, rejected_signal_df, stats = analyzer.scan_trade_candidates(
+        market_data,
+        make_params(entry_factor="trend_breakout", trend_breakout_lookback=1),
+    )
+
+    assert detail_df.empty
+    assert not signal_trace_df.empty
+    assert int(stats["core_signal_count"]) >= 1
+    assert int(stats["rejected_signal_count"]) >= 1
+    assert not rejected_signal_df.empty
+    assert "快慢线过滤未通过" in str(rejected_signal_df.iloc[0]["reject_reason_chain"])
+
+
+def test_scan_trade_candidates_keeps_short_gross_return_from_rules() -> None:
+    market_data = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-02-01", "2024-02-02", "2024-02-03", "2024-02-04"]),
+            "stock_code": ["000002.SZ"] * 4,
+            "open": [100.0, 98.8, 96.8, 96.2],
+            "high": [100.2, 99.0, 97.0, 96.5],
+            "low": [98.5, 96.8, 95.8, 94.0],
+            "close": [98.8, 97.0, 96.2, 94.5],
+            "volume": [1000.0, 1100.0, 1200.0, 1250.0],
+        }
+    )
+
+    detail_df, signal_trace_df, _, stats = analyzer.scan_trade_candidates(
+        market_data,
+        make_params(
+            gap_direction="down",
+            entry_factor="candle_run",
+            candle_run_length=2,
+            candle_run_min_body_pct=1.0,
+            candle_run_total_move_pct=2.0,
+        ),
+    )
+
+    assert int(stats["closed_trade_candidates"]) == 1
+    assert not signal_trace_df.empty
+    assert float(detail_df.iloc[0]["gross_return_pct"]) > 0.0
 
 
 def test_eshb_execution_loads_required_indicator_keys(monkeypatch) -> None:

@@ -83,13 +83,15 @@ def test_parameter_scan_ranks_best_combo_and_keeps_best_outputs() -> None:
         metric="total_return_pct",
         max_combinations=25,
     )
-    scan_df, detail_df, daily_df, equity_df, stats, best_overrides = run_parameter_scan(
+    scan_df, detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats, best_overrides = run_parameter_scan(
         make_market_data(), make_params(scan_config)
     )
     assert len(scan_df) == 2
     assert int(scan_df.iloc[0]["rank"]) == 1
     assert float(scan_df.iloc[0]["gap_pct"]) == 2.0
     assert not detail_df.empty
+    assert not signal_trace_df.empty
+    assert rejected_signal_df.empty
     assert not daily_df.empty
     assert not equity_df.empty
     assert float(best_overrides["gap_pct"]) == 2.0

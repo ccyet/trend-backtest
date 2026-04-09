@@ -424,13 +424,13 @@ class AnalysisParams:
 
     @property
     def effective_imported_indicator_filters(self) -> tuple[ImportedIndicatorRule, ...]:
+        if not self.enable_imported_indicator_filter:
+            return ()
         enabled_rules = tuple(
             rule for rule in self.imported_indicator_filters if rule.enabled
         )
         if enabled_rules:
             return enabled_rules
-        if not self.enable_imported_indicator_filter:
-            return ()
         return (
             ImportedIndicatorRule(
                 enabled=True,
@@ -444,13 +444,13 @@ class AnalysisParams:
 
     @property
     def effective_imported_indicator_exits(self) -> tuple[ImportedIndicatorRule, ...]:
+        if not self.enable_imported_indicator_exit:
+            return ()
         enabled_rules = tuple(
             rule for rule in self.imported_indicator_exits if rule.enabled
         )
         if enabled_rules:
             return tuple(sorted(enabled_rules, key=lambda rule: rule.priority))
-        if not self.enable_imported_indicator_exit:
-            return ()
         return (
             ImportedIndicatorRule(
                 enabled=True,

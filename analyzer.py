@@ -50,6 +50,34 @@ BASE_DETAIL_COLUMNS = [
     "exit_reason",
 ]
 
+REJECTED_SIGNAL_COLUMNS = [
+    "date",
+    "stock_code",
+    "entry_factor",
+    "entry_trigger_price",
+    "gap_pct_vs_prev_close",
+    "reject_reason_chain",
+]
+
+SIGNAL_TRACE_COLUMNS = [
+    "date",
+    "stock_code",
+    "entry_factor",
+    "entry_trigger_price",
+    "setup_pass",
+    "setup_reason",
+    "trigger_pass",
+    "trigger_reason",
+    "filter_pass",
+    "ma_filter_pass",
+    "atr_filter_pass",
+    "board_ma_filter_pass",
+    "imported_filter_pass",
+    "trade_closed",
+    "reject_reason_chain",
+    "execution_skip_reason",
+]
+
 DETAIL_COLUMNS = BASE_DETAIL_COLUMNS + [
     "trade_no",
     "nav_before_trade",
@@ -149,6 +177,8 @@ ANOMALY_QUEUE_COLUMNS = [
 @dataclass(frozen=True)
 class BacktestResultBundle:
     detail_df: pd.DataFrame
+    signal_trace_df: pd.DataFrame
+    rejected_signal_df: pd.DataFrame
     daily_df: pd.DataFrame
     equity_df: pd.DataFrame
     trade_behavior_df: pd.DataFrame
@@ -170,7 +200,9 @@ class ScanExecutionContext:
 
 def _empty_scan_stats() -> dict[str, int]:
     return {
+        "core_signal_count": 0,
         "signal_count": 0,
+        "rejected_signal_count": 0,
         "closed_trade_candidates": 0,
         "skipped_insufficient_future": 0,
         "skipped_unclosed_trade": 0,
@@ -280,17 +312,75 @@ def _build_scan_execution_context(
 def _scan_trade_candidates_with_context(
     params: AnalysisParams,
     context: ScanExecutionContext,
-) -> tuple[pd.DataFrame, dict[str, int]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
     if not context.grouped_stock_frames:
-        return pd.DataFrame(columns=pd.Index(BASE_DETAIL_COLUMNS)), _empty_scan_stats()
+        return (
+            pd.DataFrame(columns=pd.Index(BASE_DETAIL_COLUMNS)),
+            pd.DataFrame(columns=pd.Index(SIGNAL_TRACE_COLUMNS)),
+            pd.DataFrame(columns=pd.Index(REJECTED_SIGNAL_COLUMNS)),
+            _empty_scan_stats(),
+        )
 
     start_ts, end_ts = _signal_window(params)
 
     detail_records: list[dict[str, Any]] = []
+    signal_trace_records: list[dict[str, Any]] = []
+    rejected_signal_frames: list[pd.DataFrame] = []
     stats = Counter()
 
     for stock_df in context.grouped_stock_frames:
         enriched = apply_gap_filters(stock_df, params)
+        for column_name in REJECTED_SIGNAL_COLUMNS:
+            if column_name not in enriched.columns:
+                enriched[column_name] = pd.NA if column_name != "reject_reason_chain" else ""
+        if "core_signal_pass" not in enriched.columns:
+            enriched["core_signal_pass"] = enriched.get("is_signal", False)
+        if "filter_pass" not in enriched.columns:
+            enriched["filter_pass"] = enriched.get("is_signal", False)
+        if "reject_reason_chain" not in enriched.columns:
+            enriched["reject_reason_chain"] = ""
+        if "setup_pass" not in enriched.columns:
+            enriched["setup_pass"] = enriched.get("core_signal_pass", enriched.get("is_signal", False))
+        if "trigger_pass" not in enriched.columns:
+            enriched["trigger_pass"] = enriched.get("core_signal_pass", enriched.get("is_signal", False))
+        trace_base_columns = [
+            "date",
+            "stock_code",
+            "entry_factor",
+            "entry_trigger_price",
+            "setup_pass",
+            "setup_reason",
+            "trigger_pass",
+            "trigger_reason",
+            "filter_pass",
+            "ma_filter_pass",
+            "atr_filter_pass",
+            "board_ma_filter_pass",
+            "imported_filter_pass",
+            "reject_reason_chain",
+        ]
+        for column_name in trace_base_columns:
+            if column_name not in enriched.columns:
+                enriched[column_name] = pd.NA if column_name != "reject_reason_chain" else ""
+        trace_preview = enriched.loc[
+            enriched["setup_pass"].fillna(False) & enriched["date"].between(start_ts, end_ts),
+            trace_base_columns,
+        ].copy()
+        if not trace_preview.empty:
+            trace_preview["trade_closed"] = False
+            trace_preview["execution_skip_reason"] = ""
+        core_signal_window_mask = enriched["core_signal_pass"].fillna(False) & enriched["date"].between(start_ts, end_ts)
+        rejected_signal_mask = (
+            enriched["core_signal_pass"].fillna(False)
+            & (~enriched["filter_pass"].fillna(False))
+        ) & enriched["date"].between(start_ts, end_ts)
+        rejected_signal_preview = enriched.loc[
+            rejected_signal_mask, REJECTED_SIGNAL_COLUMNS
+        ].copy()
+        if not rejected_signal_preview.empty:
+            rejected_signal_frames.append(rejected_signal_preview)
+        stats["core_signal_count"] += int(core_signal_window_mask.sum())
+        stats["rejected_signal_count"] += int(rejected_signal_mask.sum())
         signal_mask = enriched["is_signal"] & enriched["date"].between(start_ts, end_ts)
         signal_indices = enriched.index[signal_mask].tolist()
         stats["signal_count"] += len(signal_indices)
@@ -345,6 +435,12 @@ def _scan_trade_candidates_with_context(
                     enriched, signal_idx, params, direction=direction
                 )
             if trade is None:
+                if not trace_preview.empty:
+                    matching_mask = (
+                        pd.to_datetime(trace_preview["date"]).eq(pd.to_datetime(enriched.iloc[signal_idx]["date"]))
+                        & trace_preview["stock_code"].astype(str).eq(str(enriched.iloc[signal_idx]["stock_code"]))
+                    )
+                    trace_preview.loc[matching_mask, "execution_skip_reason"] = str(skip_reason or "")
                 if skip_reason == "insufficient_future":
                     stats["skipped_insufficient_future"] += 1
                 elif skip_reason == "unclosed_trade":
@@ -368,27 +464,43 @@ def _scan_trade_candidates_with_context(
             )
             trade["sell_date"] = fills[-1]["sell_date"]
             trade["exit_type"] = "+".join(str(fill["exit_type"]) for fill in fills)
-            trade["gross_return_pct"] = (
-                trade["sell_price"] / float(trade["buy_price"]) - 1.0
-            ) * 100.0
             trade["fill_count"] = len(fills)
             trade["fill_detail_json"] = json.dumps(fills, ensure_ascii=False)
             detail_records.append(trade)
             stats["closed_trade_candidates"] += 1
+            if not trace_preview.empty:
+                matching_mask = (
+                    pd.to_datetime(trace_preview["date"]).eq(pd.to_datetime(trade["date"]))
+                    & trace_preview["stock_code"].astype(str).eq(str(trade["stock_code"]))
+                )
+                trace_preview.loc[matching_mask, "trade_closed"] = True
+
+        if not trace_preview.empty:
+            signal_trace_records.extend(trace_preview.to_dict("records"))
 
     detail_df = pd.DataFrame(detail_records, columns=pd.Index(BASE_DETAIL_COLUMNS))
+    signal_trace_df = pd.DataFrame(signal_trace_records, columns=pd.Index(SIGNAL_TRACE_COLUMNS))
+    rejected_signal_df = (
+        pd.concat(rejected_signal_frames, ignore_index=True)
+        if rejected_signal_frames
+        else pd.DataFrame(columns=pd.Index(REJECTED_SIGNAL_COLUMNS))
+    )
     if detail_df.empty:
-        return detail_df, {**_empty_scan_stats(), **dict(stats)}
+        return detail_df, signal_trace_df, rejected_signal_df, {**_empty_scan_stats(), **dict(stats)}
 
     detail_df = detail_df.sort_values(["date", "stock_code", "sell_date"]).reset_index(
         drop=True
     )
-    return detail_df, {**_empty_scan_stats(), **dict(stats)}
+    if not rejected_signal_df.empty:
+        rejected_signal_df = rejected_signal_df.sort_values(["date", "stock_code"]).reset_index(drop=True)
+    if not signal_trace_df.empty:
+        signal_trace_df = signal_trace_df.sort_values(["date", "stock_code"]).reset_index(drop=True)
+    return detail_df, signal_trace_df, rejected_signal_df, {**_empty_scan_stats(), **dict(stats)}
 
 
 def scan_trade_candidates(
     all_data: pd.DataFrame, params: AnalysisParams
-) -> tuple[pd.DataFrame, dict[str, int]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
     return _scan_trade_candidates_with_context(
         params, _build_scan_execution_context(all_data, params)
     )
@@ -628,8 +740,8 @@ def build_equity_curve(
 def analyze_all_stocks(
     all_data: pd.DataFrame,
     params: AnalysisParams,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    candidate_df, scan_stats = _scan_trade_candidates_with_context(
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    candidate_df, signal_trace_df, rejected_signal_df, scan_stats = _scan_trade_candidates_with_context(
         params, _build_scan_execution_context(all_data, params)
     )
     strategy_df, strategy_stats = build_strategy_trades(candidate_df)
@@ -640,15 +752,15 @@ def analyze_all_stocks(
         strategy_stats["max_drawdown_pct"] = abs(float(equity_df["drawdown_pct"].min()))
 
     combined_stats: dict[str, float] = {**scan_stats, **strategy_stats}
-    return strategy_df, daily_df, equity_df, combined_stats
+    return strategy_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, combined_stats
 
 
 def _analyze_all_stocks_with_context(
     all_data: pd.DataFrame,
     params: AnalysisParams,
     context: ScanExecutionContext,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    candidate_df, scan_stats = _scan_trade_candidates_with_context(params, context)
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    candidate_df, signal_trace_df, rejected_signal_df, scan_stats = _scan_trade_candidates_with_context(params, context)
     strategy_df, strategy_stats = build_strategy_trades(candidate_df)
     daily_df = build_daily_summary(strategy_df)
     equity_df = build_equity_curve(all_data, strategy_df, params)
@@ -657,7 +769,7 @@ def _analyze_all_stocks_with_context(
         strategy_stats["max_drawdown_pct"] = abs(float(equity_df["drawdown_pct"].min()))
 
     combined_stats: dict[str, float] = {**scan_stats, **strategy_stats}
-    return strategy_df, daily_df, equity_df, combined_stats
+    return strategy_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, combined_stats
 
 
 def run_parameter_scan(
@@ -668,19 +780,23 @@ def run_parameter_scan(
     pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
     dict[str, float],
     dict[str, int | float],
 ]:
     scan_config = params.scan_config
     if not scan_config.enabled or not scan_config.axes:
-        detail_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
-        return pd.DataFrame(), detail_df, daily_df, equity_df, stats, {}
+        detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
+        return pd.DataFrame(), detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats, {}
 
     field_names = [axis.field_name for axis in scan_config.axes]
     value_product = product(*(axis.values for axis in scan_config.axes))
     result_rows: list[dict[str, int | float]] = []
     best_payload: (
         tuple[
+            pd.DataFrame,
+            pd.DataFrame,
             pd.DataFrame,
             pd.DataFrame,
             pd.DataFrame,
@@ -703,7 +819,7 @@ def run_parameter_scan(
             for field_name, value in zip(field_names, combo, strict=True)
         }
         scan_params = apply_scan_overrides(params, overrides)
-        detail_df, daily_df, equity_df, stats = _analyze_all_stocks_with_context(
+        detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = _analyze_all_stocks_with_context(
             all_data, scan_params, scan_context
         )
         metric_value = float(stats.get(scan_config.metric, 0.0))
@@ -715,7 +831,7 @@ def run_parameter_scan(
         result_rows.append(row)
 
         if best_payload is None:
-            best_payload = (detail_df, daily_df, equity_df, stats, overrides)
+            best_payload = (detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats, overrides)
             best_metric_value = metric_value
             continue
 
@@ -725,13 +841,13 @@ def run_parameter_scan(
         else:
             should_replace = metric_value > best_metric_value
         if should_replace:
-            best_payload = (detail_df, daily_df, equity_df, stats, overrides)
+            best_payload = (detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats, overrides)
             best_metric_value = metric_value
 
     scan_df = pd.DataFrame(result_rows)
     if scan_df.empty or best_payload is None:
-        detail_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
-        return pd.DataFrame(), detail_df, daily_df, equity_df, stats, {}
+        detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
+        return pd.DataFrame(), detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats, {}
 
     sort_ascending = lower_is_better
     scan_df = scan_df.sort_values(
@@ -749,9 +865,9 @@ def run_parameter_scan(
         ]
         + ["rank"]
     )
-    detail_df, daily_df, equity_df, stats, overrides = best_payload
+    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats, overrides = best_payload
     ordered_scan_df = scan_df.loc[:, ordered_columns].copy()
-    return ordered_scan_df, detail_df, daily_df, equity_df, stats, overrides
+    return ordered_scan_df, detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats, overrides
 
 
 def build_daily_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
@@ -1163,6 +1279,8 @@ def build_trade_anomaly_queue(
 def _finalize_result_bundle(
     *,
     detail_df: pd.DataFrame,
+    signal_trace_df: pd.DataFrame,
+    rejected_signal_df: pd.DataFrame,
     daily_df: pd.DataFrame,
     equity_df: pd.DataFrame,
     stats: dict[str, float],
@@ -1179,6 +1297,8 @@ def _finalize_result_bundle(
     anomaly_queue_df = build_trade_anomaly_queue(detail_df, params)
     return BacktestResultBundle(
         detail_df=detail_df,
+        signal_trace_df=signal_trace_df,
+        rejected_signal_df=rejected_signal_df,
         daily_df=daily_df,
         equity_df=equity_df,
         trade_behavior_df=trade_behavior_df,
@@ -1198,9 +1318,11 @@ def _finalize_result_bundle(
 def _run_combined_backtest(
     all_data: pd.DataFrame, params: AnalysisParams
 ) -> BacktestResultBundle:
-    detail_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
+    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyze_all_stocks(all_data, params)
     return _finalize_result_bundle(
         detail_df=detail_df,
+        signal_trace_df=signal_trace_df,
+        rejected_signal_df=rejected_signal_df,
         daily_df=daily_df,
         equity_df=equity_df,
         stats=stats,
@@ -1211,11 +1333,13 @@ def _run_combined_backtest(
 def _run_scan_backtest(
     all_data: pd.DataFrame, params: AnalysisParams
 ) -> BacktestResultBundle:
-    scan_df, detail_df, daily_df, equity_df, stats, best_scan_overrides = (
+    scan_df, detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats, best_scan_overrides = (
         run_parameter_scan(all_data, params)
     )
     return _finalize_result_bundle(
         detail_df=detail_df,
+        signal_trace_df=signal_trace_df,
+        rejected_signal_df=rejected_signal_df,
         daily_df=daily_df,
         equity_df=equity_df,
         stats=stats,
@@ -1229,6 +1353,8 @@ def _run_per_stock_backtest(
     all_data: pd.DataFrame, params: AnalysisParams
 ) -> BacktestResultBundle:
     batch_detail_frames: list[pd.DataFrame] = []
+    batch_signal_trace_frames: list[pd.DataFrame] = []
+    batch_rejected_frames: list[pd.DataFrame] = []
     batch_daily_frames: list[pd.DataFrame] = []
     batch_equity_frames: list[pd.DataFrame] = []
     batch_rows: list[dict[str, Any]] = []
@@ -1242,7 +1368,7 @@ def _run_per_stock_backtest(
         stock_data = all_data.loc[
             all_data["stock_code"].astype(str) == str(stock_code)
         ].copy()
-        single_detail_df, single_daily_df, single_equity_df, single_stats = (
+        single_detail_df, single_signal_trace_df, single_rejected_df, single_daily_df, single_equity_df, single_stats = (
             analyze_all_stocks(stock_data, single_params)
         )
         if not single_detail_df.empty:
@@ -1257,6 +1383,14 @@ def _run_per_stock_backtest(
             single_equity_df = single_equity_df.copy()
             single_equity_df["batch_stock_code"] = stock_code
             batch_equity_frames.append(single_equity_df)
+        if not single_rejected_df.empty:
+            single_rejected_df = single_rejected_df.copy()
+            single_rejected_df["batch_stock_code"] = stock_code
+            batch_rejected_frames.append(single_rejected_df)
+        if not single_signal_trace_df.empty:
+            single_signal_trace_df = single_signal_trace_df.copy()
+            single_signal_trace_df["batch_stock_code"] = stock_code
+            batch_signal_trace_frames.append(single_signal_trace_df)
         batch_rows.append(
             {
                 "stock_code": stock_code,
@@ -1293,6 +1427,16 @@ def _run_per_stock_backtest(
         if batch_equity_frames
         else pd.DataFrame()
     )
+    rejected_signal_df = (
+        pd.concat(batch_rejected_frames, ignore_index=True)
+        if batch_rejected_frames
+        else pd.DataFrame(columns=pd.Index(REJECTED_SIGNAL_COLUMNS))
+    )
+    signal_trace_df = (
+        pd.concat(batch_signal_trace_frames, ignore_index=True)
+        if batch_signal_trace_frames
+        else pd.DataFrame(columns=pd.Index(SIGNAL_TRACE_COLUMNS))
+    )
     per_stock_stats_df = pd.DataFrame(batch_rows)
     if per_stock_stats_df.empty:
         stats: dict[str, float] = {}
@@ -1305,10 +1449,26 @@ def _run_per_stock_backtest(
             "max_drawdown_pct": float(per_stock_stats_df["max_drawdown_pct"].mean()),
             "executed_trades": float(per_stock_stats_df["executed_trades"].sum()),
             "signal_count": float(per_stock_stats_df["signal_count"].sum()),
+            "core_signal_count": float(
+                signal_trace_df["trigger_pass"].fillna(False).sum()
+            )
+            if not signal_trace_df.empty
+            else 0.0,
+            "rejected_signal_count": float(
+                (
+                    signal_trace_df["trigger_pass"].fillna(False)
+                    & (~signal_trace_df["filter_pass"].fillna(False))
+                ).sum()
+            )
+            if not signal_trace_df.empty
+            else 0.0,
+            "closed_trade_candidates": float(len(detail_df)),
         }
 
     return _finalize_result_bundle(
         detail_df=detail_df,
+        signal_trace_df=signal_trace_df,
+        rejected_signal_df=rejected_signal_df,
         daily_df=daily_df,
         equity_df=equity_df,
         stats=stats,

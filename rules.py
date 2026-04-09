@@ -240,6 +240,83 @@ def _build_entry_reason(params: AnalysisParams, entry_factor: str) -> str:
     return f"{entry_factor}.{direction_text}"
 
 
+def _build_setup_reason(params: AnalysisParams) -> str:
+    if params.entry_factor == "gap":
+        return (
+            "gap 形态成立：开盘跳空达到阈值"
+            if params.gap_entry_mode == "open_vs_prev_close_threshold"
+            else "gap 形态成立：开盘相对前高/前低形成严格跳空"
+        )
+    if params.entry_factor == "trend_breakout":
+        return "趋势突破 setup 成立：已生成过去窗口突破触发价"
+    if params.entry_factor == "volatility_contraction_breakout":
+        return "波动收缩突破 setup 成立：收缩结构和突破触发价均已形成"
+    if params.entry_factor == "candle_run":
+        return "连续K线追势 setup 成立：前序连续K线组合满足要求"
+    if params.entry_factor == "candle_run_acceleration":
+        return "连续K线加速追势 setup 成立：前序连续K线且实体强度不递减"
+    if params.entry_factor == ESHB_ENTRY_FACTOR:
+        return "早盘冲高高位横盘 setup 成立：30m 形态已确认"
+    return f"{params.entry_factor} setup 成立"
+
+
+def _build_trigger_reason(params: AnalysisParams) -> str:
+    if params.entry_factor == "gap":
+        return "gap 真实触发：当日开盘即为触发点"
+    if params.entry_factor == "trend_breakout":
+        return "趋势突破真实触发：当根价格突破 trigger 价"
+    if params.entry_factor == "volatility_contraction_breakout":
+        return "波动收缩突破真实触发：收缩后当根价格突破 trigger 价"
+    if params.entry_factor == "candle_run":
+        return "连续K线追势真实触发：下一根K线进入执行点"
+    if params.entry_factor == "candle_run_acceleration":
+        return "连续K线加速追势真实触发：下一根K线进入执行点"
+    if params.entry_factor == ESHB_ENTRY_FACTOR:
+        return "早盘冲高高位横盘真实触发：5m 突破 base high"
+    return f"{params.entry_factor} 真实触发"
+
+
+def _directional_ma_filter_mask(stock_df: pd.DataFrame, params: AnalysisParams) -> pd.Series:
+    mask = stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
+    if params.gap_direction == "down":
+        mask &= stock_df["open"] < stock_df["fast_ma"]
+        mask &= stock_df["open"] < stock_df["slow_ma"]
+    else:
+        mask &= stock_df["open"] > stock_df["fast_ma"]
+        mask &= stock_df["open"] > stock_df["slow_ma"]
+    return mask.fillna(False)
+
+
+def _append_reject_reason(
+    stock_df: pd.DataFrame, base_mask: pd.Series, pass_mask: pd.Series, reason_label: str
+) -> None:
+    reject_mask = base_mask & (~pass_mask.fillna(False))
+    if not reject_mask.any():
+        return
+    existing = stock_df.loc[reject_mask, "reject_reason_chain"].fillna("").astype(str)
+    stock_df.loc[reject_mask, "reject_reason_chain"] = existing.map(
+        lambda text: reason_label if not text else f"{text} -> {reason_label}"
+    )
+
+
+def _build_breakout_trigger_pass_mask(
+    stock_df: pd.DataFrame, params: AnalysisParams
+) -> pd.Series:
+    trigger_price = stock_df["entry_trigger_price"]
+    trigger_mask = trigger_price.notna()
+    if params.gap_direction == "down":
+        trigger_mask &= (
+            (_column(stock_df, "open") <= trigger_price)
+            | (_column(stock_df, "low") <= trigger_price)
+        )
+    else:
+        trigger_mask &= (
+            (_column(stock_df, "open") >= trigger_price)
+            | (_column(stock_df, "high") >= trigger_price)
+        )
+    return trigger_mask.fillna(False)
+
+
 def _atr_trailing_stop_price(
     reference_price: float,
     atr_value: float | None,
@@ -571,6 +648,17 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
     stock_df["eshb_anchor_break_count"] = 0
     stock_df["eshb_anchor_break_depth_pct"] = math.nan
     stock_df["eshb_breakout_volume_ratio"] = math.nan
+    stock_df["setup_pass"] = False
+    stock_df["trigger_pass"] = False
+    stock_df["setup_reason"] = ""
+    stock_df["trigger_reason"] = ""
+    stock_df["core_signal_pass"] = False
+    stock_df["filter_pass"] = False
+    stock_df["ma_filter_pass"] = pd.NA
+    stock_df["atr_filter_pass"] = pd.NA
+    stock_df["board_ma_filter_pass"] = pd.NA
+    stock_df["imported_filter_pass"] = pd.NA
+    stock_df["reject_reason_chain"] = ""
 
     signal_mask = (
         stock_df["prev_close"].notna()
@@ -578,35 +666,31 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
         & stock_df["prev_low"].notna()
     )
 
+    setup_mask = signal_mask.copy()
+    trigger_mask = signal_mask.copy()
+
     if params.entry_factor == "gap":
         if params.gap_direction == "up":
             if params.gap_entry_mode == "open_vs_prev_close_threshold":
-                signal_mask &= stock_df["gap_pct_vs_prev_close"] >= params.gap_pct
+                setup_mask &= stock_df["gap_pct_vs_prev_close"] >= params.gap_pct
             else:
-                signal_mask &= stock_df["open"] > stock_df["prev_high"] * (
+                setup_mask &= stock_df["open"] > stock_df["prev_high"] * (
                     1.0 + params.gap_ratio
                 )
-            signal_mask &= (
+            setup_mask &= (
                 stock_df["gap_pct_vs_prev_close"] <= params.max_gap_filter_pct
             )
-            if params.use_ma_filter:
-                signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
-                signal_mask &= stock_df["open"] > stock_df["fast_ma"]
-                signal_mask &= stock_df["open"] > stock_df["slow_ma"]
         else:
             if params.gap_entry_mode == "open_vs_prev_close_threshold":
-                signal_mask &= stock_df["gap_pct_vs_prev_close"] <= -params.gap_pct
+                setup_mask &= stock_df["gap_pct_vs_prev_close"] <= -params.gap_pct
             else:
-                signal_mask &= stock_df["open"] < stock_df["prev_low"] * (
+                setup_mask &= stock_df["open"] < stock_df["prev_low"] * (
                     1.0 - params.gap_ratio
                 )
-            signal_mask &= (
+            setup_mask &= (
                 stock_df["gap_pct_vs_prev_close"] >= -params.max_gap_filter_pct
             )
-            if params.use_ma_filter:
-                signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
-                signal_mask &= stock_df["open"] < stock_df["fast_ma"]
-                signal_mask &= stock_df["open"] < stock_df["slow_ma"]
+        trigger_mask = setup_mask.copy()
     elif params.entry_factor in BREAKOUT_ENTRY_FACTORS:
         stock_df["entry_trigger_price"] = _compute_breakout_trigger_price(
             stock_df, params
@@ -617,16 +701,9 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
             ).shift(1)
             contraction_floor = prior_range.rolling(params.vcb_range_lookback).min()
             stock_df["is_contraction"] = prior_range.eq(contraction_floor)
-            signal_mask &= stock_df["is_contraction"]
-        signal_mask &= stock_df["entry_trigger_price"].notna()
-        if params.use_ma_filter:
-            signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
-            if params.gap_direction == "down":
-                signal_mask &= stock_df["open"] < stock_df["fast_ma"]
-                signal_mask &= stock_df["open"] < stock_df["slow_ma"]
-            else:
-                signal_mask &= stock_df["open"] > stock_df["fast_ma"]
-                signal_mask &= stock_df["open"] > stock_df["slow_ma"]
+            setup_mask &= stock_df["is_contraction"]
+        setup_mask &= stock_df["entry_trigger_price"].notna()
+        trigger_mask = setup_mask & _build_breakout_trigger_pass_mask(stock_df, params)
     elif params.entry_factor == ESHB_ENTRY_FACTOR:
         setup_frame = _build_eshb_setup_frame(stock_df, params)
         for column in setup_frame.columns:
@@ -634,22 +711,27 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
         stock_df["entry_trigger_price"] = stock_df["eshb_base_high"] * (
             1.0 + params.eshb_trigger_buffer_pct / 100.0
         )
-        signal_mask &= stock_df["eshb_base_high"].notna()
-        signal_mask &= stock_df["entry_trigger_price"].notna()
-        if params.use_ma_filter:
-            signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
-            signal_mask &= stock_df["open"] > stock_df["fast_ma"]
-            signal_mask &= stock_df["open"] > stock_df["slow_ma"]
+        setup_mask &= stock_df["eshb_base_high"].notna()
+        setup_mask &= stock_df["entry_trigger_price"].notna()
+        trigger_mask = setup_mask.copy()
     else:
-        signal_mask &= _build_candle_run_signal_mask(stock_df, params)
-        if params.use_ma_filter:
-            signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
-            if params.gap_direction == "down":
-                signal_mask &= stock_df["open"] < stock_df["fast_ma"]
-                signal_mask &= stock_df["open"] < stock_df["slow_ma"]
-            else:
-                signal_mask &= stock_df["open"] > stock_df["fast_ma"]
-                signal_mask &= stock_df["open"] > stock_df["slow_ma"]
+        setup_mask &= _build_candle_run_signal_mask(stock_df, params)
+        trigger_mask = setup_mask.copy()
+
+    stock_df["setup_pass"] = setup_mask.fillna(False)
+    stock_df["trigger_pass"] = trigger_mask.fillna(False)
+    stock_df.loc[stock_df["setup_pass"], "setup_reason"] = _build_setup_reason(params)
+    stock_df.loc[stock_df["trigger_pass"], "trigger_reason"] = _build_trigger_reason(params)
+    stock_df["core_signal_pass"] = stock_df["trigger_pass"]
+    signal_mask = trigger_mask.copy()
+
+    if params.use_ma_filter:
+        ma_filter_mask = _directional_ma_filter_mask(stock_df, params)
+        stock_df["ma_filter_pass"] = ma_filter_mask.fillna(False)
+        _append_reject_reason(stock_df, signal_mask, ma_filter_mask, "快慢线过滤未通过")
+        signal_mask &= ma_filter_mask
+    else:
+        stock_df["ma_filter_pass"] = pd.NA
 
     if params.enable_atr_filter:
         stock_df["atr_filter_value"] = _compute_atr_series(
@@ -658,12 +740,18 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
         stock_df["atr_filter_pct"] = (
             stock_df["atr_filter_value"] / stock_df["prev_close"]
         ) * 100.0
-        signal_mask &= stock_df["atr_filter_pct"].notna()
-        signal_mask &= stock_df["atr_filter_pct"] >= params.min_atr_filter_pct
-        signal_mask &= stock_df["atr_filter_pct"] <= params.max_atr_filter_pct
+        atr_filter_mask = stock_df["atr_filter_pct"].notna()
+        atr_filter_mask &= stock_df["atr_filter_pct"] >= params.min_atr_filter_pct
+        atr_filter_mask &= stock_df["atr_filter_pct"] <= params.max_atr_filter_pct
+        stock_df["atr_filter_pass"] = atr_filter_mask.fillna(False)
+        _append_reject_reason(stock_df, signal_mask, atr_filter_mask, "ATR过滤未通过")
+        signal_mask &= atr_filter_mask
+    else:
+        stock_df["atr_filter_pass"] = pd.NA
 
     if params.enable_board_ma_filter:
         board_ma_filter_rule = _build_board_ma_filter_rule(params)
+        prior_signal_mask = signal_mask.copy()
         signal_mask = _apply_numeric_threshold_filter(
             stock_df,
             signal_mask,
@@ -672,8 +760,11 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
             threshold=board_ma_filter_rule.threshold,
             value_column_name=board_ma_filter_rule.value_column_name,
         )
+        stock_df["board_ma_filter_pass"] = signal_mask.where(prior_signal_mask, pd.NA)
+        _append_reject_reason(stock_df, prior_signal_mask, signal_mask, "板块均线过滤未通过")
     else:
         stock_df["board_ma_signal_value"] = math.nan
+        stock_df["board_ma_filter_pass"] = pd.NA
 
     imported_filter_rules = params.effective_imported_indicator_filters
     if imported_filter_rules:
@@ -682,6 +773,7 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
             numeric_rule = _build_numeric_rule(
                 rule, f"imported_indicator_filter_value_{rule_index}"
             )
+            prior_signal_mask = signal_mask.copy()
             signal_mask = _apply_numeric_threshold_filter(
                 stock_df,
                 signal_mask,
@@ -690,11 +782,15 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
                 threshold=numeric_rule.threshold,
                 value_column_name=numeric_rule.value_column_name,
             )
+            _append_reject_reason(stock_df, prior_signal_mask, signal_mask, f"导入指标过滤规则{rule_index}未通过")
             collected_filter_values.append(stock_df[numeric_rule.value_column_name])
         stock_df["imported_indicator_filter_value"] = collected_filter_values[0]
+        stock_df["imported_filter_pass"] = signal_mask.where(stock_df["trigger_pass"].fillna(False), pd.NA)
     else:
         stock_df["imported_indicator_filter_value"] = math.nan
+        stock_df["imported_filter_pass"] = pd.NA
 
+    stock_df["filter_pass"] = signal_mask.fillna(False)
     stock_df["is_signal"] = signal_mask
     return stock_df
 

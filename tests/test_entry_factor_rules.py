@@ -317,6 +317,7 @@ def test_multiple_imported_indicator_filters_use_and_semantics() -> None:
     df["strength"] = [60.0, 55.0]
     df["breadth"] = [25.0, 15.0]
     params = make_params(
+        enable_imported_indicator_filter=True,
         imported_indicator_filters=(
             ImportedIndicatorRule(True, "ind_a", "strength", ">=", 50.0, 1),
             ImportedIndicatorRule(True, "ind_b", "breadth", ">=", 20.0, 2),
@@ -324,7 +325,7 @@ def test_multiple_imported_indicator_filters_use_and_semantics() -> None:
     )
     result = apply_gap_filters(df, params)
 
-    assert float(result.loc[1, "imported_indicator_filter_value_1"]) == 55.0
+    assert float(result.loc[1, "imported_indicator_filter_value"]) == 55.0
     assert float(result.loc[1, "imported_indicator_filter_value_2"]) == 15.0
     assert not bool(result.loc[1, "is_signal"])
 
@@ -426,6 +427,7 @@ def test_multiple_imported_indicator_exit_rules_trigger_in_priority_order() -> N
     df["exit_a"] = [20.0, 15.0, 8.0]
     df["exit_b"] = [20.0, 15.0, 4.0]
     params = make_params(
+        enable_imported_indicator_exit=True,
         imported_indicator_exits=(
             ImportedIndicatorRule(True, "ind_a", "exit_a", "<=", 10.0, 1),
             ImportedIndicatorRule(True, "ind_b", "exit_b", "<=", 10.0, 2),
@@ -508,6 +510,9 @@ def test_trend_breakout_long_no_fill_is_skipped() -> None:
 
     assert trade is None
     assert reason == "entry_not_filled"
+    assert bool(enriched.loc[1, "setup_pass"])
+    assert not bool(enriched.loc[1, "trigger_pass"])
+    assert not bool(enriched.loc[1, "is_signal"])
 
 
 def test_trend_breakout_short_open_fill_uses_open_price() -> None:
@@ -551,6 +556,9 @@ def test_trend_breakout_short_trigger_fill_uses_trigger_price() -> None:
     assert trade["entry_factor"] == "trend_breakout"
     assert float(trade["entry_trigger_price"]) == 95.0
     assert trade["entry_fill_type"] == "trigger"
+    assert bool(enriched.loc[1, "setup_pass"])
+    assert bool(enriched.loc[1, "trigger_pass"])
+    assert bool(enriched.loc[1, "is_signal"])
     assert float(trade["buy_price"]) == 95.0
 
 

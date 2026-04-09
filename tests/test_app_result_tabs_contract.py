@@ -15,7 +15,7 @@ def _between(source: str, start: str, end: str) -> str:
 def test_result_tabs_include_dedicated_diagnostics_partition() -> None:
     source = (ROOT / "app.py").read_text(encoding="utf-8")
 
-    assert 'tab_names = ["📊 绩效总览", "📈 资金曲线", "🩺 交易诊断", "📝 交易明细"]' in source
+    assert "tab_names = build_result_tab_names(" in source
     assert "tab_summary, tab_curve, tab_diagnostics, tab_details = tabs[:4]" in source
 
 
@@ -56,8 +56,9 @@ def test_per_stock_equity_curve_uses_identifiable_grouped_traces() -> None:
 def test_data_prep_and_backtest_overview_are_sidebar_only_contract() -> None:
     source = (ROOT / "app.py").read_text(encoding="utf-8")
 
-    assert 'with st.sidebar.expander("数据准备", expanded=False):' in source
-    assert 'with st.sidebar.expander("回测概览", expanded=True):' in source
-    assert 'section_header("数据准备"' not in source
-    assert 'section_header("回测概览"' not in source
-    assert 'with st.expander("本地行情更新（离线下载）", expanded=False):' not in source
+    assert 'page_mode_options = ["回测工作台", "数据准备页", "交易配置说明"]' in source
+    assert 'if page_mode == "数据准备页":' in source
+    assert 'key="goto_data_prep"' in source
+    assert 'on_click=request_page_change' in source
+    assert 'section_header("配置摘要"' in source
+    assert 'section_header(ADVANCED_SECTION_TITLE, ADVANCED_SECTION_CAPTION)' in source
