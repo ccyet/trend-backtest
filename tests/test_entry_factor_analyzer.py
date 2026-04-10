@@ -175,7 +175,9 @@ def test_scan_trade_candidates_propagates_skip_counters_and_entry_fields(
     monkeypatch.setattr(analyzer, "apply_gap_filters", fake_apply_gap_filters)
     monkeypatch.setattr(analyzer, "simulate_trade", fake_simulate_trade)
 
-    detail_df, signal_trace_df, rejected_signal_df, stats = analyzer.scan_trade_candidates(make_market_data(), make_params())
+    detail_df, signal_trace_df, rejected_signal_df, stats = (
+        analyzer.scan_trade_candidates(make_market_data(), make_params())
+    )
 
     assert stats["signal_count"] == 4
     assert stats["closed_trade_candidates"] == 2
@@ -236,7 +238,9 @@ def test_scan_trade_candidates_keeps_date_stock_sell_date_sort_order(
     monkeypatch.setattr(analyzer, "apply_gap_filters", fake_apply_gap_filters)
     monkeypatch.setattr(analyzer, "simulate_trade", fake_simulate_trade)
 
-    detail_df, _, _, _ = analyzer.scan_trade_candidates(make_market_data(), make_params())
+    detail_df, _, _, _ = analyzer.scan_trade_candidates(
+        make_market_data(), make_params()
+    )
 
     observed = detail_df[["date", "stock_code", "sell_date"]].copy()
     observed["date"] = pd.Series(pd.to_datetime(observed["date"])).map(
@@ -259,13 +263,79 @@ def test_scan_trade_candidates_keeps_date_stock_sell_date_sort_order(
 
 
 def test_empty_scan_stats_include_new_skip_counters() -> None:
-    detail_df, signal_trace_df, rejected_signal_df, stats = analyzer.scan_trade_candidates(pd.DataFrame(), make_params())
+    detail_df, signal_trace_df, rejected_signal_df, stats = (
+        analyzer.scan_trade_candidates(pd.DataFrame(), make_params())
+    )
 
     assert detail_df.empty
     assert signal_trace_df.empty
     assert rejected_signal_df.empty
     assert stats["skipped_entry_not_filled"] == 0
     assert stats["skipped_locked_bar_unfillable"] == 0
+    assert stats["skipped_missing_execution_data"] == 0
+
+
+def test_eshb_missing_execution_data_is_counted_separately(monkeypatch) -> None:
+    setup_data = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-02 10:30:00"]),
+            "stock_code": ["000001.SZ"],
+            "open": [104.5],
+            "high": [104.8],
+            "low": [104.2],
+            "close": [104.6],
+            "volume": [120.0],
+        }
+    )
+
+    def fake_apply_gap_filters(
+        stock_df: pd.DataFrame, _params: AnalysisParams
+    ) -> pd.DataFrame:
+        enriched = stock_df.copy()
+        enriched["is_signal"] = [True]
+        enriched["entry_trigger_price"] = [105.0]
+        enriched["entry_factor"] = ["early_surge_high_base"]
+        enriched["setup_pass"] = [True]
+        enriched["setup_reason"] = ["eshb.setup"]
+        enriched["trigger_pass"] = [True]
+        enriched["trigger_reason"] = ["eshb.trigger_pending"]
+        enriched["filter_pass"] = [True]
+        enriched["ma_filter_pass"] = [pd.NA]
+        enriched["atr_filter_pass"] = [pd.NA]
+        enriched["board_ma_filter_pass"] = [pd.NA]
+        enriched["imported_filter_pass"] = [pd.NA]
+        enriched["trade_closed"] = [False]
+        enriched["reject_reason_chain"] = [""]
+        enriched["execution_skip_reason"] = [""]
+        return enriched
+
+    monkeypatch.setattr(analyzer, "apply_gap_filters", fake_apply_gap_filters)
+    monkeypatch.setattr(
+        analyzer,
+        "load_local_parquet_data",
+        lambda **_: pd.DataFrame(
+            columns=["date", "stock_code", "open", "high", "low", "close", "volume"]
+        ),
+    )
+
+    detail_df, signal_trace_df, rejected_signal_df, stats = (
+        analyzer.scan_trade_candidates(
+            setup_data,
+            make_params(
+                entry_factor="early_surge_high_base",
+                timeframe="30m",
+                start_date="2024-01-02",
+                end_date="2024-01-02",
+                time_stop_days=1,
+            ),
+        )
+    )
+
+    assert detail_df.empty
+    assert rejected_signal_df.empty
+    assert stats["signal_count"] == 1
+    assert stats["skipped_missing_execution_data"] == 1
+    assert signal_trace_df["execution_skip_reason"].eq("missing_execution_data").any()
 
 
 def test_analyze_all_stocks_supports_candle_run_strategy_level_stats() -> None:
@@ -282,14 +352,16 @@ def test_analyze_all_stocks_supports_candle_run_strategy_level_stats() -> None:
             "volume": [1000.0, 1200.0, 1100.0, 1300.0],
         }
     )
-    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
-        market_data,
-        make_params(
-            entry_factor="candle_run",
-            candle_run_length=2,
-            candle_run_min_body_pct=1.0,
-            candle_run_total_move_pct=2.0,
-        ),
+    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = (
+        analyzer.analyze_all_stocks(
+            market_data,
+            make_params(
+                entry_factor="candle_run",
+                candle_run_length=2,
+                candle_run_min_body_pct=1.0,
+                candle_run_total_move_pct=2.0,
+            ),
+        )
     )
 
     assert len(detail_df) == 1
@@ -317,15 +389,17 @@ def test_analyze_all_stocks_supports_short_candle_run_strategy_level_stats() -> 
             "volume": [1000.0, 1100.0, 1200.0, 1250.0],
         }
     )
-    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
-        market_data,
-        make_params(
-            gap_direction="down",
-            entry_factor="candle_run",
-            candle_run_length=2,
-            candle_run_min_body_pct=1.0,
-            candle_run_total_move_pct=2.0,
-        ),
+    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = (
+        analyzer.analyze_all_stocks(
+            market_data,
+            make_params(
+                gap_direction="down",
+                entry_factor="candle_run",
+                candle_run_length=2,
+                candle_run_min_body_pct=1.0,
+                candle_run_total_move_pct=2.0,
+            ),
+        )
     )
 
     assert len(detail_df) == 1
@@ -355,14 +429,16 @@ def test_analyze_all_stocks_supports_candle_run_acceleration_strategy_level_stat
             "volume": [1000.0, 1100.0, 1200.0, 1300.0],
         }
     )
-    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
-        market_data,
-        make_params(
-            entry_factor="candle_run_acceleration",
-            candle_run_length=2,
-            candle_run_min_body_pct=0.5,
-            candle_run_total_move_pct=2.0,
-        ),
+    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = (
+        analyzer.analyze_all_stocks(
+            market_data,
+            make_params(
+                entry_factor="candle_run_acceleration",
+                candle_run_length=2,
+                candle_run_min_body_pct=0.5,
+                candle_run_total_move_pct=2.0,
+            ),
+        )
     )
 
     assert len(detail_df) == 1
@@ -392,15 +468,17 @@ def test_analyze_all_stocks_supports_short_candle_run_acceleration_strategy_leve
             "volume": [1000.0, 1100.0, 1200.0, 1300.0],
         }
     )
-    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
-        market_data,
-        make_params(
-            gap_direction="down",
-            entry_factor="candle_run_acceleration",
-            candle_run_length=2,
-            candle_run_min_body_pct=0.5,
-            candle_run_total_move_pct=2.0,
-        ),
+    detail_df, signal_trace_df, rejected_signal_df, daily_df, equity_df, stats = (
+        analyzer.analyze_all_stocks(
+            market_data,
+            make_params(
+                gap_direction="down",
+                entry_factor="candle_run_acceleration",
+                candle_run_length=2,
+                candle_run_min_body_pct=0.5,
+                candle_run_total_move_pct=2.0,
+            ),
+        )
     )
 
     assert len(detail_df) == 1
@@ -457,26 +535,28 @@ def test_scan_trade_candidates_supports_eshb_30m_setup_and_5m_execution(
 
     monkeypatch.setattr(analyzer, "load_local_parquet_data", lambda **_: execution_data)
 
-    detail_df, signal_trace_df, rejected_signal_df, stats = analyzer.scan_trade_candidates(
-        setup_data,
-        make_params(
-            entry_factor="early_surge_high_base",
-            timeframe="30m",
-            start_date="2024-01-02",
-            end_date="2024-01-02",
-            eshb_open_window_bars=3,
-            eshb_base_min_bars=2,
-            eshb_base_max_bars=4,
-            eshb_surge_min_pct=3.0,
-            eshb_max_base_pullback_pct=2.5,
-            eshb_max_base_range_pct=1.0,
-            eshb_max_anchor_breaks=0,
-            eshb_max_anchor_break_depth_pct=0.5,
-            eshb_min_open_volume_ratio=1.5,
-            eshb_min_breakout_volume_ratio=1.0,
-            eshb_trigger_buffer_pct=0.0,
-            time_stop_days=1,
-        ),
+    detail_df, signal_trace_df, rejected_signal_df, stats = (
+        analyzer.scan_trade_candidates(
+            setup_data,
+            make_params(
+                entry_factor="early_surge_high_base",
+                timeframe="30m",
+                start_date="2024-01-02",
+                end_date="2024-01-02",
+                eshb_open_window_bars=3,
+                eshb_base_min_bars=2,
+                eshb_base_max_bars=4,
+                eshb_surge_min_pct=3.0,
+                eshb_max_base_pullback_pct=2.5,
+                eshb_max_base_range_pct=1.0,
+                eshb_max_anchor_breaks=0,
+                eshb_max_anchor_break_depth_pct=0.5,
+                eshb_min_open_volume_ratio=1.5,
+                eshb_min_breakout_volume_ratio=1.0,
+                eshb_trigger_buffer_pct=0.0,
+                time_stop_days=1,
+            ),
+        )
     )
 
     assert len(detail_df) == 1
@@ -506,9 +586,11 @@ def test_scan_trade_candidates_keeps_rejected_signal_reason_chain(monkeypatch) -
 
     monkeypatch.setattr(analyzer, "apply_gap_filters", fake_apply_gap_filters)
 
-    detail_df, signal_trace_df, rejected_signal_df, stats = analyzer.scan_trade_candidates(
-        market_data,
-        make_params(entry_factor="trend_breakout", trend_breakout_lookback=1),
+    detail_df, signal_trace_df, rejected_signal_df, stats = (
+        analyzer.scan_trade_candidates(
+            market_data,
+            make_params(entry_factor="trend_breakout", trend_breakout_lookback=1),
+        )
     )
 
     assert detail_df.empty
@@ -522,7 +604,9 @@ def test_scan_trade_candidates_keeps_rejected_signal_reason_chain(monkeypatch) -
 def test_scan_trade_candidates_keeps_short_gross_return_from_rules() -> None:
     market_data = pd.DataFrame(
         {
-            "date": pd.to_datetime(["2024-02-01", "2024-02-02", "2024-02-03", "2024-02-04"]),
+            "date": pd.to_datetime(
+                ["2024-02-01", "2024-02-02", "2024-02-03", "2024-02-04"]
+            ),
             "stock_code": ["000002.SZ"] * 4,
             "open": [100.0, 98.8, 96.8, 96.2],
             "high": [100.2, 99.0, 97.0, 96.5],
@@ -664,7 +748,9 @@ def test_build_drawdown_diagnostics_returns_episodes_and_reason_contributors() -
 def test_build_drawdown_diagnostics_by_batch_keeps_per_stock_isolation() -> None:
     equity_df = pd.DataFrame(
         {
-            "date": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-01", "2024-01-02"]),
+            "date": pd.to_datetime(
+                ["2024-01-01", "2024-01-02", "2024-01-01", "2024-01-02"]
+            ),
             "net_value": [1.0, 0.9, 1.0, 1.1],
             "drawdown_pct": [0.0, -10.0, 0.0, 0.0],
             "batch_stock_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],

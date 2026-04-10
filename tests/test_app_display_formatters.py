@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+from streamlit.testing.v1 import AppTest
 
 import app
 from ui.components import results_view
@@ -25,7 +26,12 @@ def test_summarize_trade_decision_chain_exposes_entry_and_exit_flow() -> None:
 
     summary_df = app.summarize_trade_decision_chain(detail_df)
 
-    assert list(summary_df.columns) == ["信号日期", "股票代码", "开仓决策链", "离场决策链"]
+    assert list(summary_df.columns) == [
+        "信号日期",
+        "股票代码",
+        "开仓决策链",
+        "离场决策链",
+    ]
     assert "gap.strict_break.up" in summary_df.iloc[0]["开仓决策链"]
     assert "触发成交 @ 10.5" in summary_df.iloc[0]["开仓决策链"]
     assert "固定止盈+ATR 跟踪止盈" in summary_df.iloc[0]["离场决策链"]
@@ -35,9 +41,24 @@ def test_summarize_trade_decision_chain_exposes_entry_and_exit_flow() -> None:
 def test_summarize_local_inventory_returns_compact_overview() -> None:
     inventory_df = pd.DataFrame(
         [
-            {"symbol": "000001.SZ", "timeframe": "1d", "row_count": 120, "updated_at": "2024-01-03 15:00:00"},
-            {"symbol": "000002.SZ", "timeframe": "1d", "row_count": 80, "updated_at": "2024-01-04 15:00:00"},
-            {"symbol": "000001.SZ", "timeframe": "30m", "row_count": 300, "updated_at": "2024-01-04 15:05:00"},
+            {
+                "symbol": "000001.SZ",
+                "timeframe": "1d",
+                "row_count": 120,
+                "updated_at": "2024-01-03 15:00:00",
+            },
+            {
+                "symbol": "000002.SZ",
+                "timeframe": "1d",
+                "row_count": 80,
+                "updated_at": "2024-01-04 15:00:00",
+            },
+            {
+                "symbol": "000001.SZ",
+                "timeframe": "30m",
+                "row_count": 300,
+                "updated_at": "2024-01-04 15:05:00",
+            },
         ]
     )
 
@@ -128,7 +149,14 @@ def test_format_rejected_signal_for_display_formats_basic_columns() -> None:
         format_percent=app.format_percent,
     )
 
-    assert list(display_df.columns) == ["信号日期", "股票代码", "入场因子", "触发价", "相对昨收跳空幅度", "拦截原因链"]
+    assert list(display_df.columns) == [
+        "信号日期",
+        "股票代码",
+        "入场因子",
+        "触发价",
+        "相对昨收跳空幅度",
+        "拦截原因链",
+    ]
 
 
 def test_render_trade_explanations_keeps_trace_sections_without_trades() -> None:
@@ -161,7 +189,9 @@ def test_render_trade_explanations_keeps_trace_sections_without_trades() -> None
         detail_df=pd.DataFrame(),
         stats={},
         section_header=lambda title, desc: None,
-        summarize_signal_funnel=lambda stats, df: pd.DataFrame([{"阶段": "真实触发", "数量": 1}]),
+        summarize_signal_funnel=lambda stats, df: pd.DataFrame(
+            [{"阶段": "真实触发", "数量": 1}]
+        ),
         summarize_filter_stack=lambda **kwargs: ["趋势突破", "ATR过滤"],
         summarize_trade_decision_chain=lambda df: pd.DataFrame(),
         dataframe_stretch=lambda *args, **kwargs: None,
@@ -181,3 +211,25 @@ def test_render_trade_explanations_keeps_trace_sections_without_trades() -> None
         board_ma_filter_threshold=50.0,
         imported_filter_count=0,
     )
+
+
+def test_filter_signal_trace_tolerates_missing_optional_columns() -> None:
+    def _render() -> None:
+        import pandas as local_pd
+
+        signal_trace_df = local_pd.DataFrame(
+            [
+                {
+                    "date": "2024-01-02",
+                    "entry_factor": "trend_breakout",
+                }
+            ]
+        )
+        from ui.components import results_view as local_results_view
+
+        local_results_view.filter_signal_trace(signal_trace_df)
+
+    at = AppTest.from_function(_render, default_timeout=10)
+    at.run()
+
+    assert len(at.exception) == 0

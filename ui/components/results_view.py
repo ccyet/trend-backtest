@@ -34,7 +34,9 @@ def build_rejected_signal_column_config() -> dict[str, object]:
         "股票代码": st.column_config.TextColumn("股票代码", width="small"),
         "入场因子": st.column_config.TextColumn("入场因子", width="medium"),
         "触发价": st.column_config.TextColumn("触发价", width="small"),
-        "相对昨收跳空幅度": st.column_config.TextColumn("相对昨收跳空幅度", width="small"),
+        "相对昨收跳空幅度": st.column_config.TextColumn(
+            "相对昨收跳空幅度", width="small"
+        ),
         "拦截原因链": st.column_config.TextColumn("拦截原因链", width="large"),
     }
 
@@ -89,9 +91,13 @@ def format_rejected_signal_for_display(
     if "date" in display_df.columns:
         display_df["date"] = display_df["date"].map(format_timestamp)
     if "entry_trigger_price" in display_df.columns:
-        display_df["entry_trigger_price"] = display_df["entry_trigger_price"].map(format_number)
+        display_df["entry_trigger_price"] = display_df["entry_trigger_price"].map(
+            format_number
+        )
     if "gap_pct_vs_prev_close" in display_df.columns:
-        display_df["gap_pct_vs_prev_close"] = display_df["gap_pct_vs_prev_close"].map(format_percent)
+        display_df["gap_pct_vs_prev_close"] = display_df["gap_pct_vs_prev_close"].map(
+            format_percent
+        )
     return display_df.rename(
         columns={
             "date": "信号日期",
@@ -114,7 +120,13 @@ def format_execution_skip_for_display(
         return signal_trace_df
     filtered = signal_trace_df.loc[
         signal_trace_df["execution_skip_reason"].fillna("").astype(str).ne(""),
-        ["date", "stock_code", "entry_factor", "entry_trigger_price", "execution_skip_reason"],
+        [
+            "date",
+            "stock_code",
+            "entry_factor",
+            "entry_trigger_price",
+            "execution_skip_reason",
+        ],
     ].copy()
     if filtered.empty:
         return filtered
@@ -141,7 +153,9 @@ def format_signal_trace_for_display(
         return signal_trace_df
     display_df = signal_trace_df.copy()
     display_df["date"] = display_df["date"].map(format_timestamp)
-    display_df["entry_trigger_price"] = display_df["entry_trigger_price"].map(format_number)
+    display_df["entry_trigger_price"] = display_df["entry_trigger_price"].map(
+        format_number
+    )
     for column in [
         "setup_pass",
         "trigger_pass",
@@ -180,11 +194,27 @@ def filter_signal_trace(signal_trace_df: pd.DataFrame) -> pd.DataFrame:
     if signal_trace_df.empty:
         return signal_trace_df
 
+    working_df = signal_trace_df.copy()
+    required_defaults: dict[str, object] = {
+        "trigger_pass": False,
+        "filter_pass": False,
+        "execution_skip_reason": "",
+        "trade_closed": False,
+        "entry_factor": "",
+        "stock_code": "",
+    }
+    for column_name, default_value in required_defaults.items():
+        if column_name not in working_df.columns:
+            working_df[column_name] = default_value
+
     trace_status_options = {
         "全部": lambda df: pd.Series([True] * len(df), index=df.index),
-        "被拦截": lambda df: df["trigger_pass"].fillna(False)
-        & (~df["filter_pass"].fillna(False)),
-        "成交失败": lambda df: df["execution_skip_reason"].fillna("").astype(str).ne(""),
+        "被拦截": lambda df: (
+            df["trigger_pass"].fillna(False) & (~df["filter_pass"].fillna(False))
+        ),
+        "成交失败": lambda df: (
+            df["execution_skip_reason"].fillna("").astype(str).ne("")
+        ),
         "形成平仓": lambda df: df["trade_closed"].fillna(False),
         "仅触发": lambda df: df["trigger_pass"].fillna(False),
     }
@@ -194,24 +224,32 @@ def filter_signal_trace(signal_trace_df: pd.DataFrame) -> pd.DataFrame:
         options=list(trace_status_options.keys()),
         key="signal_trace_status_filter",
     )
-    factor_options = ["全部"] + sorted(signal_trace_df["entry_factor"].dropna().astype(str).unique().tolist())
+    factor_options = ["全部"] + sorted(
+        working_df["entry_factor"].dropna().astype(str).unique().tolist()
+    )
     factor_filter = filter_cols[1].selectbox(
         "轨迹因子",
         options=factor_options,
         key="signal_trace_factor_filter",
     )
-    stock_options = ["全部"] + sorted(signal_trace_df["stock_code"].dropna().astype(str).unique().tolist())
+    stock_options = ["全部"] + sorted(
+        working_df["stock_code"].dropna().astype(str).unique().tolist()
+    )
     stock_filter = filter_cols[2].selectbox(
         "轨迹股票",
         options=stock_options,
         key="signal_trace_stock_filter",
     )
 
-    filtered_df = signal_trace_df.loc[trace_status_options[status_filter](signal_trace_df)].copy()
+    filtered_df = working_df.loc[trace_status_options[status_filter](working_df)].copy()
     if factor_filter != "全部":
-        filtered_df = filtered_df.loc[filtered_df["entry_factor"].astype(str) == factor_filter]
+        filtered_df = filtered_df.loc[
+            filtered_df["entry_factor"].astype(str) == factor_filter
+        ]
     if stock_filter != "全部":
-        filtered_df = filtered_df.loc[filtered_df["stock_code"].astype(str) == stock_filter]
+        filtered_df = filtered_df.loc[
+            filtered_df["stock_code"].astype(str) == stock_filter
+        ]
     return filtered_df.reset_index(drop=True)
 
 
@@ -244,14 +282,22 @@ def render_trade_explanations(
 ) -> None:
     section_header("交易明细", "表头已转中文，优先展示交易关键信息与成交明细。")
     detail_meta_cols = st.columns(3)
-    detail_meta_cols[0].metric("交易笔数", f"{len(detail_df) if isinstance(detail_df, pd.DataFrame) else 0}")
-    detail_meta_cols[1].metric("平均持有天数", f"{float(stats.get('avg_holding_days', 0.0)):.2f}")
-    detail_meta_cols[2].metric("净收益中位数", f"{float(stats.get('median_net_return_pct', 0.0)):.2f}%")
+    detail_meta_cols[0].metric(
+        "交易笔数", f"{len(detail_df) if isinstance(detail_df, pd.DataFrame) else 0}"
+    )
+    detail_meta_cols[1].metric(
+        "平均持有天数", f"{float(stats.get('avg_holding_days', 0.0)):.2f}"
+    )
+    detail_meta_cols[2].metric(
+        "净收益中位数", f"{float(stats.get('median_net_return_pct', 0.0)):.2f}%"
+    )
 
     st.markdown("**信号放行/拦截概览**")
     funnel_cols = st.columns([1.2, 1.8])
     with funnel_cols[0]:
-        dataframe_stretch(summarize_signal_funnel(stats, signal_trace_df), hide_index=True, height=220)
+        dataframe_stretch(
+            summarize_signal_funnel(stats, signal_trace_df), hide_index=True, height=220
+        )
     with funnel_cols[1]:
         active_filters = summarize_filter_stack(
             entry_factor=str(entry_factor),
@@ -270,7 +316,9 @@ def render_trade_explanations(
         st.caption("当前启用的决策链顺序")
         for idx, filter_label in enumerate(active_filters, start=1):
             st.markdown(f"{idx}. {filter_label}")
-        st.caption("核心信号先由入场因子给出，再依次经过已启用过滤条件；只有放行后的信号才会进入成交与持仓模拟。")
+        st.caption(
+            "核心信号先由入场因子给出，再依次经过已启用过滤条件；只有放行后的信号才会进入成交与持仓模拟。"
+        )
         st.markdown("**次级固定止盈说明**")
         for line in summarize_secondary_take_profit_logic():
             st.caption(line)
@@ -307,7 +355,9 @@ def render_trade_explanations(
 
     if isinstance(signal_trace_df, pd.DataFrame) and not signal_trace_df.empty:
         st.markdown("**信号轨迹下钻**")
-        st.caption("逐条查看形态成立、真实触发、各过滤器 pass/fail、是否形成平仓交易以及失败原因。")
+        st.caption(
+            "逐条查看形态成立、真实触发、各过滤器 pass/fail、是否形成平仓交易以及失败原因。"
+        )
         filtered_signal_trace_df = filter_signal_trace(signal_trace_df)
         dataframe_stretch(
             format_signal_trace_for_display(
@@ -319,7 +369,9 @@ def render_trade_explanations(
             column_config=build_signal_trace_column_config(),
             height=260,
         )
-        trace_csv_bytes = filtered_signal_trace_df.to_csv(index=False).encode("utf-8-sig")
+        trace_csv_bytes = filtered_signal_trace_df.to_csv(index=False).encode(
+            "utf-8-sig"
+        )
         st.download_button(
             "导出轨迹 CSV",
             data=trace_csv_bytes,
@@ -333,4 +385,6 @@ def render_trade_explanations(
         st.caption("先看哪条开仓规则触发、如何成交，再看最终由哪条离场规则完成退出。")
         dataframe_stretch(decision_chain_df, hide_index=True, height=260)
     elif not isinstance(detail_df, pd.DataFrame) or detail_df.empty:
-        st.info("当前没有形成平仓交易，可优先查看上方漏斗、被拦截信号、成交失败信号和轨迹下钻。")
+        st.info(
+            "当前没有形成平仓交易，可优先查看上方漏斗、被拦截信号、成交失败信号和轨迹下钻。"
+        )

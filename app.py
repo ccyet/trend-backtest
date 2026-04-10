@@ -93,6 +93,7 @@ RESULT_STATE_KEYS = [
     "download_name",
     "per_stock_stats_df",
     "batch_backtest_mode",
+    "result_params_snapshot",
 ]
 
 DETAIL_PRICE_COLUMNS = [
@@ -879,6 +880,96 @@ def clear_result_state() -> None:
         st.session_state.pop(key, None)
 
 
+def build_result_params_snapshot(params: AnalysisParams) -> dict[str, object]:
+    return {
+        "entry_factor": str(params.entry_factor),
+        "use_ma_filter": bool(params.use_ma_filter),
+        "fast_ma_period": int(params.fast_ma_period),
+        "slow_ma_period": int(params.slow_ma_period),
+        "enable_atr_filter": bool(params.enable_atr_filter),
+        "min_atr_filter_pct": float(params.min_atr_filter_pct),
+        "max_atr_filter_pct": float(params.max_atr_filter_pct),
+        "enable_board_ma_filter": bool(params.enable_board_ma_filter),
+        "board_ma_filter_line": str(params.board_ma_filter_line),
+        "board_ma_filter_operator": str(params.board_ma_filter_operator),
+        "board_ma_filter_threshold": float(params.board_ma_filter_threshold),
+        "imported_filter_count": int(len(params.effective_imported_indicator_filters)),
+    }
+
+
+def store_backtest_result_state(
+    *,
+    detail_df: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    equity_df: pd.DataFrame,
+    trade_behavior_df: pd.DataFrame,
+    drawdown_episodes_df: pd.DataFrame,
+    drawdown_contributors_df: pd.DataFrame,
+    anomaly_queue_df: pd.DataFrame,
+    stats: dict[str, Any],
+    scan_df: pd.DataFrame,
+    scan_metric: str,
+    scan_axis_fields: list[str],
+    best_scan_overrides: dict[str, Any],
+    excel_bytes: bytes,
+    download_name: str,
+    per_stock_stats_df: pd.DataFrame,
+    batch_backtest_mode: str,
+    result_params_snapshot: dict[str, object],
+) -> None:
+    st.session_state["detail_df"] = detail_df
+    st.session_state["daily_df"] = daily_df
+    st.session_state["equity_df"] = equity_df
+    st.session_state["trade_behavior_df"] = trade_behavior_df
+    st.session_state["drawdown_episodes_df"] = drawdown_episodes_df
+    st.session_state["drawdown_contributors_df"] = drawdown_contributors_df
+    st.session_state["anomaly_queue_df"] = anomaly_queue_df
+    st.session_state["stats"] = stats
+    st.session_state["scan_df"] = scan_df
+    st.session_state["scan_metric"] = scan_metric
+    st.session_state["scan_axis_fields"] = scan_axis_fields
+    st.session_state["best_scan_overrides"] = best_scan_overrides
+    st.session_state["excel_bytes"] = excel_bytes
+    st.session_state["download_name"] = download_name
+    st.session_state["per_stock_stats_df"] = per_stock_stats_df
+    st.session_state["batch_backtest_mode"] = batch_backtest_mode
+    st.session_state["result_params_snapshot"] = result_params_snapshot
+
+
+def load_backtest_result_state() -> dict[str, Any]:
+    return {
+        "detail_df": st.session_state.get("detail_df", pd.DataFrame()),
+        "signal_trace_df": st.session_state.get("signal_trace_df", pd.DataFrame()),
+        "rejected_signal_df": st.session_state.get(
+            "rejected_signal_df", pd.DataFrame()
+        ),
+        "daily_df": st.session_state.get("daily_df", pd.DataFrame()),
+        "equity_df": st.session_state.get("equity_df", pd.DataFrame()),
+        "trade_behavior_df": st.session_state.get("trade_behavior_df", pd.DataFrame()),
+        "drawdown_episodes_df": st.session_state.get(
+            "drawdown_episodes_df", pd.DataFrame()
+        ),
+        "drawdown_contributors_df": st.session_state.get(
+            "drawdown_contributors_df", pd.DataFrame()
+        ),
+        "anomaly_queue_df": st.session_state.get("anomaly_queue_df", pd.DataFrame()),
+        "stats": st.session_state.get("stats", {}),
+        "scan_df": st.session_state.get("scan_df", pd.DataFrame()),
+        "scan_metric": str(st.session_state.get("scan_metric", "total_return_pct")),
+        "scan_axis_fields": list(st.session_state.get("scan_axis_fields", [])),
+        "best_scan_overrides": dict(st.session_state.get("best_scan_overrides", {})),
+        "per_stock_stats_df": st.session_state.get(
+            "per_stock_stats_df", pd.DataFrame()
+        ),
+        "batch_backtest_mode": str(
+            st.session_state.get("batch_backtest_mode", "combined")
+        ),
+        "result_params_snapshot": cast(
+            dict[str, object], st.session_state.get("result_params_snapshot", {})
+        ),
+    }
+
+
 def factor_control_default(field_name: str) -> Any:
     return FACTOR_CONTROL_DEFAULTS[field_name]
 
@@ -951,7 +1042,9 @@ def summarize_local_inventory(preview_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["周期", "标的数", "总行数", "最近更新"])
 
     summary_df = preview_df.copy()
-    summary_df["updated_at"] = pd.to_datetime(summary_df.get("updated_at"), errors="coerce")
+    summary_df["updated_at"] = pd.to_datetime(
+        summary_df.get("updated_at"), errors="coerce"
+    )
     grouped = (
         summary_df.groupby("timeframe", dropna=False)
         .agg(
@@ -961,7 +1054,9 @@ def summarize_local_inventory(preview_df: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
-    grouped["latest_update"] = grouped["latest_update"].map(format_timestamp_for_display)
+    grouped["latest_update"] = grouped["latest_update"].map(
+        format_timestamp_for_display
+    )
     return grouped.rename(
         columns={
             "timeframe": "周期",
@@ -975,15 +1070,23 @@ def summarize_local_inventory(preview_df: pd.DataFrame) -> pd.DataFrame:
 def summarize_signal_funnel(
     stats: dict[str, Any], signal_trace_df: pd.DataFrame | None = None
 ) -> pd.DataFrame:
-    trace_df = signal_trace_df if isinstance(signal_trace_df, pd.DataFrame) else pd.DataFrame()
+    trace_df = (
+        signal_trace_df if isinstance(signal_trace_df, pd.DataFrame) else pd.DataFrame()
+    )
     if not trace_df.empty:
         setup_count = int(trace_df["setup_pass"].fillna(False).sum())
         trigger_count = int(trace_df["trigger_pass"].fillna(False).sum())
         filter_pass_count = int(
-            (trace_df["trigger_pass"].fillna(False) & trace_df["filter_pass"].fillna(False)).sum()
+            (
+                trace_df["trigger_pass"].fillna(False)
+                & trace_df["filter_pass"].fillna(False)
+            ).sum()
         )
         rejected_count = int(
-            (trace_df["trigger_pass"].fillna(False) & (~trace_df["filter_pass"].fillna(False))).sum()
+            (
+                trace_df["trigger_pass"].fillna(False)
+                & (~trace_df["filter_pass"].fillna(False))
+            ).sum()
         )
         execution_skip_count = int(
             (
@@ -994,14 +1097,18 @@ def summarize_signal_funnel(
         )
     else:
         setup_count = int(stats.get("core_signal_count", stats.get("signal_count", 0)))
-        trigger_count = int(stats.get("core_signal_count", stats.get("signal_count", 0)))
+        trigger_count = int(
+            stats.get("core_signal_count", stats.get("signal_count", 0))
+        )
         filter_pass_count = int(stats.get("signal_count", 0))
         rejected_count = int(stats.get("rejected_signal_count", 0))
-        execution_skip_count = int(stats.get("skipped_entry_not_filled", 0)) + int(
-            stats.get("skipped_locked_bar_unfillable", 0)
-        ) + int(stats.get("skipped_insufficient_future", 0)) + int(
-            stats.get("skipped_unclosed_trade", 0)
-        ) + int(stats.get("skipped_no_exit", 0))
+        execution_skip_count = (
+            int(stats.get("skipped_entry_not_filled", 0))
+            + int(stats.get("skipped_locked_bar_unfillable", 0))
+            + int(stats.get("skipped_insufficient_future", 0))
+            + int(stats.get("skipped_unclosed_trade", 0))
+            + int(stats.get("skipped_no_exit", 0))
+        )
     funnel_rows = [
         {"阶段": "形态成立", "数量": setup_count},
         {"阶段": "真实触发", "数量": trigger_count},
@@ -1011,8 +1118,14 @@ def summarize_signal_funnel(
         {"阶段": "形成平仓交易", "数量": int(stats.get("closed_trade_candidates", 0))},
         {"阶段": "实际执行交易", "数量": int(stats.get("executed_trades", 0))},
         {"阶段": "未成交跳过", "数量": int(stats.get("skipped_entry_not_filled", 0))},
-        {"阶段": "一字板/无量跳过", "数量": int(stats.get("skipped_locked_bar_unfillable", 0))},
-        {"阶段": "持仓重叠跳过", "数量": int(stats.get("skipped_overlapping_position", 0))},
+        {
+            "阶段": "一字板/无量跳过",
+            "数量": int(stats.get("skipped_locked_bar_unfillable", 0)),
+        },
+        {
+            "阶段": "持仓重叠跳过",
+            "数量": int(stats.get("skipped_overlapping_position", 0)),
+        },
     ]
     return pd.DataFrame(funnel_rows)
 
@@ -2812,7 +2925,9 @@ allowed_timeframes = enforce_entry_factor_timeframe(sidebar_entry_factor)
 timeframe = st.sidebar.selectbox(
     "周期",
     options=list(allowed_timeframes),
-    index=list(allowed_timeframes).index(str(st.session_state.get("timeframe", allowed_timeframes[0]))),
+    index=list(allowed_timeframes).index(
+        str(st.session_state.get("timeframe", allowed_timeframes[0]))
+    ),
     key="timeframe",
 )
 st.sidebar.caption(get_strategy_capability_summary(sidebar_entry_factor))
@@ -2968,7 +3083,9 @@ render_backtest_summary_cards(
     strategy_caption=get_strategy_capability_summary(current_entry_factor),
 )
 
-if str(timeframe) in {"30m", "15m", "5m"} and not normalize_stock_codes(stock_scope_text):
+if str(timeframe) in {"30m", "15m", "5m"} and not normalize_stock_codes(
+    stock_scope_text
+):
     st.warning("当前选择分钟级数据且未指定股票池，读取本地数据时 IO 开销可能较高。")
 
 # ===== 主界面：规则配置 =====
@@ -2988,44 +3105,146 @@ with st.container():
     if entry_factor == "gap":
         st.caption("保留原有跳空参数布局，只显示 gap 相关阈值。")
         entry_top_cols = st.columns([1, 1.6])
-        direction_label = render_direction_selectbox(str(entry_factor), entry_top_cols[0])
+        direction_label = render_direction_selectbox(
+            str(entry_factor), entry_top_cols[0]
+        )
         entry_top_cols[1].selectbox(
             "开仓模式",
             options=list(GAP_ENTRY_MODES),
-            format_func=lambda value: "严格突破前高/前低" if value == "strict_break" else "开盘相对昨收达阈值",
+            format_func=lambda value: (
+                "严格突破前高/前低" if value == "strict_break" else "开盘相对昨收达阈值"
+            ),
             key="gap_entry_mode",
         )
         gap_cols = st.columns(2)
-        gap_cols[0].number_input("跳空幅度（%）", min_value=0.0, value=float(factor_control_default("gap_pct")), step=0.1, key="gap_pct")
-        gap_cols[1].number_input("最大高开/低开过滤（%）", min_value=0.0, value=float(factor_control_default("max_gap_filter_pct")), step=0.1, key="max_gap_filter_pct")
+        gap_cols[0].number_input(
+            "跳空幅度（%）",
+            min_value=0.0,
+            value=float(factor_control_default("gap_pct")),
+            step=0.1,
+            key="gap_pct",
+        )
+        gap_cols[1].number_input(
+            "最大高开/低开过滤（%）",
+            min_value=0.0,
+            value=float(factor_control_default("max_gap_filter_pct")),
+            step=0.1,
+            key="max_gap_filter_pct",
+        )
     elif entry_factor == "trend_breakout":
         st.caption("趋势突破仅保留方向与回看窗口，避免混入 gap 专属控件。")
         direction_label = render_direction_selectbox(str(entry_factor))
-        st.number_input("趋势突破回看天数", min_value=1, value=int(factor_control_default("trend_breakout_lookback")), step=1, key="trend_breakout_lookback")
+        st.number_input(
+            "趋势突破回看天数",
+            min_value=1,
+            value=int(factor_control_default("trend_breakout_lookback")),
+            step=1,
+            key="trend_breakout_lookback",
+        )
     elif entry_factor == "volatility_contraction_breakout":
         st.caption("波动收缩突破仅显示收缩/突破窗口，保持核心区紧凑。")
         direction_label = render_direction_selectbox(str(entry_factor))
         vcb_cols = st.columns(2)
-        vcb_cols[0].number_input("收缩区间回看天数", min_value=1, value=int(factor_control_default("vcb_range_lookback")), step=1, key="vcb_range_lookback")
-        vcb_cols[1].number_input("突破回看天数", min_value=1, value=int(factor_control_default("vcb_breakout_lookback")), step=1, key="vcb_breakout_lookback")
+        vcb_cols[0].number_input(
+            "收缩区间回看天数",
+            min_value=1,
+            value=int(factor_control_default("vcb_range_lookback")),
+            step=1,
+            key="vcb_range_lookback",
+        )
+        vcb_cols[1].number_input(
+            "突破回看天数",
+            min_value=1,
+            value=int(factor_control_default("vcb_breakout_lookback")),
+            step=1,
+            key="vcb_breakout_lookback",
+        )
     elif entry_factor == "early_surge_high_base":
-        st.caption("先在 30m 识别早盘冲高后的高位横盘，再用 5m 突破确认并在下一根 5m 开盘入场。")
+        st.caption(
+            "先在 30m 识别早盘冲高后的高位横盘，再用 5m 突破确认并在下一根 5m 开盘入场。"
+        )
         direction_label = render_direction_selectbox(str(entry_factor))
         eshb_cols_1 = st.columns(3)
-        eshb_cols_1[0].number_input("早盘观察窗口K数", min_value=1, value=int(factor_control_default("eshb_open_window_bars")), step=1, key="eshb_open_window_bars")
-        eshb_cols_1[1].number_input("高位横盘最少K数", min_value=1, value=int(factor_control_default("eshb_base_min_bars")), step=1, key="eshb_base_min_bars")
-        eshb_cols_1[2].number_input("高位横盘最多K数", min_value=1, value=int(factor_control_default("eshb_base_max_bars")), step=1, key="eshb_base_max_bars")
+        eshb_cols_1[0].number_input(
+            "早盘观察窗口K数",
+            min_value=1,
+            value=int(factor_control_default("eshb_open_window_bars")),
+            step=1,
+            key="eshb_open_window_bars",
+        )
+        eshb_cols_1[1].number_input(
+            "高位横盘最少K数",
+            min_value=1,
+            value=int(factor_control_default("eshb_base_min_bars")),
+            step=1,
+            key="eshb_base_min_bars",
+        )
+        eshb_cols_1[2].number_input(
+            "高位横盘最多K数",
+            min_value=1,
+            value=int(factor_control_default("eshb_base_max_bars")),
+            step=1,
+            key="eshb_base_max_bars",
+        )
         eshb_cols_2 = st.columns(3)
-        eshb_cols_2[0].number_input("早盘冲高最小涨幅（%）", min_value=0.0, value=float(factor_control_default("eshb_surge_min_pct")), step=0.1, key="eshb_surge_min_pct")
-        eshb_cols_2[1].number_input("横盘最大回撤（%）", min_value=0.0, value=float(factor_control_default("eshb_max_base_pullback_pct")), step=0.1, key="eshb_max_base_pullback_pct")
-        eshb_cols_2[2].number_input("横盘最大振幅（%）", min_value=0.0, value=float(factor_control_default("eshb_max_base_range_pct")), step=0.1, key="eshb_max_base_range_pct")
+        eshb_cols_2[0].number_input(
+            "早盘冲高最小涨幅（%）",
+            min_value=0.0,
+            value=float(factor_control_default("eshb_surge_min_pct")),
+            step=0.1,
+            key="eshb_surge_min_pct",
+        )
+        eshb_cols_2[1].number_input(
+            "横盘最大回撤（%）",
+            min_value=0.0,
+            value=float(factor_control_default("eshb_max_base_pullback_pct")),
+            step=0.1,
+            key="eshb_max_base_pullback_pct",
+        )
+        eshb_cols_2[2].number_input(
+            "横盘最大振幅（%）",
+            min_value=0.0,
+            value=float(factor_control_default("eshb_max_base_range_pct")),
+            step=0.1,
+            key="eshb_max_base_range_pct",
+        )
         eshb_cols_3 = st.columns(3)
-        eshb_cols_3[0].number_input("锚点跌破次数上限", min_value=0, value=int(factor_control_default("eshb_max_anchor_breaks")), step=1, key="eshb_max_anchor_breaks")
-        eshb_cols_3[1].number_input("锚点跌破深度上限（%）", min_value=0.0, value=float(factor_control_default("eshb_max_anchor_break_depth_pct")), step=0.1, key="eshb_max_anchor_break_depth_pct")
-        eshb_cols_3[2].number_input("冲高量能倍数下限", min_value=0.0, value=float(factor_control_default("eshb_min_open_volume_ratio")), step=0.1, key="eshb_min_open_volume_ratio")
+        eshb_cols_3[0].number_input(
+            "锚点跌破次数上限",
+            min_value=0,
+            value=int(factor_control_default("eshb_max_anchor_breaks")),
+            step=1,
+            key="eshb_max_anchor_breaks",
+        )
+        eshb_cols_3[1].number_input(
+            "锚点跌破深度上限（%）",
+            min_value=0.0,
+            value=float(factor_control_default("eshb_max_anchor_break_depth_pct")),
+            step=0.1,
+            key="eshb_max_anchor_break_depth_pct",
+        )
+        eshb_cols_3[2].number_input(
+            "冲高量能倍数下限",
+            min_value=0.0,
+            value=float(factor_control_default("eshb_min_open_volume_ratio")),
+            step=0.1,
+            key="eshb_min_open_volume_ratio",
+        )
         eshb_cols_4 = st.columns(2)
-        eshb_cols_4[0].number_input("突破量能倍数下限", min_value=0.0, value=float(factor_control_default("eshb_min_breakout_volume_ratio")), step=0.1, key="eshb_min_breakout_volume_ratio")
-        eshb_cols_4[1].number_input("突破触发缓冲（%）", min_value=0.0, value=float(factor_control_default("eshb_trigger_buffer_pct")), step=0.01, key="eshb_trigger_buffer_pct")
+        eshb_cols_4[0].number_input(
+            "突破量能倍数下限",
+            min_value=0.0,
+            value=float(factor_control_default("eshb_min_breakout_volume_ratio")),
+            step=0.1,
+            key="eshb_min_breakout_volume_ratio",
+        )
+        eshb_cols_4[1].number_input(
+            "突破触发缓冲（%）",
+            min_value=0.0,
+            value=float(factor_control_default("eshb_trigger_buffer_pct")),
+            step=0.01,
+            key="eshb_trigger_buffer_pct",
+        )
     else:
         is_acceleration_mode = entry_factor == "candle_run_acceleration"
         st.caption(
@@ -3035,49 +3254,169 @@ with st.container():
         )
         direction_label = render_direction_selectbox(str(entry_factor))
         candle_cols = st.columns(3)
-        candle_cols[0].number_input("连续K线根数", min_value=2, value=int(factor_control_default("candle_run_length")), step=1, key="candle_run_length")
-        candle_cols[1].number_input("单根最小实体幅度（%）", min_value=0.0, value=float(factor_control_default("candle_run_min_body_pct")), step=0.1, key="candle_run_min_body_pct")
-        candle_cols[2].number_input("组合最小累计涨跌幅（%）", min_value=0.0, value=float(factor_control_default("candle_run_total_move_pct")), step=0.1, key="candle_run_total_move_pct")
+        candle_cols[0].number_input(
+            "连续K线根数",
+            min_value=2,
+            value=int(factor_control_default("candle_run_length")),
+            step=1,
+            key="candle_run_length",
+        )
+        candle_cols[1].number_input(
+            "单根最小实体幅度（%）",
+            min_value=0.0,
+            value=float(factor_control_default("candle_run_min_body_pct")),
+            step=0.1,
+            key="candle_run_min_body_pct",
+        )
+        candle_cols[2].number_input(
+            "组合最小累计涨跌幅（%）",
+            min_value=0.0,
+            value=float(factor_control_default("candle_run_total_move_pct")),
+            step=0.1,
+            key="candle_run_total_move_pct",
+        )
 
-gap_entry_mode = str(st.session_state.get("gap_entry_mode", factor_control_default("gap_entry_mode")))
+gap_entry_mode = str(
+    st.session_state.get("gap_entry_mode", factor_control_default("gap_entry_mode"))
+)
 gap_pct = float(st.session_state.get("gap_pct", factor_control_default("gap_pct")))
-max_gap_filter_pct = float(st.session_state.get("max_gap_filter_pct", factor_control_default("max_gap_filter_pct")))
-trend_breakout_lookback = int(st.session_state.get("trend_breakout_lookback", factor_control_default("trend_breakout_lookback")))
-vcb_range_lookback = int(st.session_state.get("vcb_range_lookback", factor_control_default("vcb_range_lookback")))
-vcb_breakout_lookback = int(st.session_state.get("vcb_breakout_lookback", factor_control_default("vcb_breakout_lookback")))
-candle_run_length = int(st.session_state.get("candle_run_length", factor_control_default("candle_run_length")))
-candle_run_min_body_pct = float(st.session_state.get("candle_run_min_body_pct", factor_control_default("candle_run_min_body_pct")))
-candle_run_total_move_pct = float(st.session_state.get("candle_run_total_move_pct", factor_control_default("candle_run_total_move_pct")))
-eshb_open_window_bars = int(st.session_state.get("eshb_open_window_bars", factor_control_default("eshb_open_window_bars")))
-eshb_base_min_bars = int(st.session_state.get("eshb_base_min_bars", factor_control_default("eshb_base_min_bars")))
-eshb_base_max_bars = int(st.session_state.get("eshb_base_max_bars", factor_control_default("eshb_base_max_bars")))
-eshb_surge_min_pct = float(st.session_state.get("eshb_surge_min_pct", factor_control_default("eshb_surge_min_pct")))
-eshb_max_base_pullback_pct = float(st.session_state.get("eshb_max_base_pullback_pct", factor_control_default("eshb_max_base_pullback_pct")))
-eshb_max_base_range_pct = float(st.session_state.get("eshb_max_base_range_pct", factor_control_default("eshb_max_base_range_pct")))
-eshb_max_anchor_breaks = int(st.session_state.get("eshb_max_anchor_breaks", factor_control_default("eshb_max_anchor_breaks")))
-eshb_max_anchor_break_depth_pct = float(st.session_state.get("eshb_max_anchor_break_depth_pct", factor_control_default("eshb_max_anchor_break_depth_pct")))
-eshb_min_open_volume_ratio = float(st.session_state.get("eshb_min_open_volume_ratio", factor_control_default("eshb_min_open_volume_ratio")))
-eshb_min_breakout_volume_ratio = float(st.session_state.get("eshb_min_breakout_volume_ratio", factor_control_default("eshb_min_breakout_volume_ratio")))
-eshb_trigger_buffer_pct = float(st.session_state.get("eshb_trigger_buffer_pct", factor_control_default("eshb_trigger_buffer_pct")))
+max_gap_filter_pct = float(
+    st.session_state.get(
+        "max_gap_filter_pct", factor_control_default("max_gap_filter_pct")
+    )
+)
+trend_breakout_lookback = int(
+    st.session_state.get(
+        "trend_breakout_lookback", factor_control_default("trend_breakout_lookback")
+    )
+)
+vcb_range_lookback = int(
+    st.session_state.get(
+        "vcb_range_lookback", factor_control_default("vcb_range_lookback")
+    )
+)
+vcb_breakout_lookback = int(
+    st.session_state.get(
+        "vcb_breakout_lookback", factor_control_default("vcb_breakout_lookback")
+    )
+)
+candle_run_length = int(
+    st.session_state.get(
+        "candle_run_length", factor_control_default("candle_run_length")
+    )
+)
+candle_run_min_body_pct = float(
+    st.session_state.get(
+        "candle_run_min_body_pct", factor_control_default("candle_run_min_body_pct")
+    )
+)
+candle_run_total_move_pct = float(
+    st.session_state.get(
+        "candle_run_total_move_pct", factor_control_default("candle_run_total_move_pct")
+    )
+)
+eshb_open_window_bars = int(
+    st.session_state.get(
+        "eshb_open_window_bars", factor_control_default("eshb_open_window_bars")
+    )
+)
+eshb_base_min_bars = int(
+    st.session_state.get(
+        "eshb_base_min_bars", factor_control_default("eshb_base_min_bars")
+    )
+)
+eshb_base_max_bars = int(
+    st.session_state.get(
+        "eshb_base_max_bars", factor_control_default("eshb_base_max_bars")
+    )
+)
+eshb_surge_min_pct = float(
+    st.session_state.get(
+        "eshb_surge_min_pct", factor_control_default("eshb_surge_min_pct")
+    )
+)
+eshb_max_base_pullback_pct = float(
+    st.session_state.get(
+        "eshb_max_base_pullback_pct",
+        factor_control_default("eshb_max_base_pullback_pct"),
+    )
+)
+eshb_max_base_range_pct = float(
+    st.session_state.get(
+        "eshb_max_base_range_pct", factor_control_default("eshb_max_base_range_pct")
+    )
+)
+eshb_max_anchor_breaks = int(
+    st.session_state.get(
+        "eshb_max_anchor_breaks", factor_control_default("eshb_max_anchor_breaks")
+    )
+)
+eshb_max_anchor_break_depth_pct = float(
+    st.session_state.get(
+        "eshb_max_anchor_break_depth_pct",
+        factor_control_default("eshb_max_anchor_break_depth_pct"),
+    )
+)
+eshb_min_open_volume_ratio = float(
+    st.session_state.get(
+        "eshb_min_open_volume_ratio",
+        factor_control_default("eshb_min_open_volume_ratio"),
+    )
+)
+eshb_min_breakout_volume_ratio = float(
+    st.session_state.get(
+        "eshb_min_breakout_volume_ratio",
+        factor_control_default("eshb_min_breakout_volume_ratio"),
+    )
+)
+eshb_trigger_buffer_pct = float(
+    st.session_state.get(
+        "eshb_trigger_buffer_pct", factor_control_default("eshb_trigger_buffer_pct")
+    )
+)
 
 section_header(RISK_SECTION_TITLE, RISK_SECTION_CAPTION)
 with st.container():
     st.caption("时间退出为基础规则，当前版本始终生效。")
     use_time_stop = True
     time_stop_cols = st.columns(2)
-    time_stop_days = time_stop_cols[0].number_input("最多持有天数 N", min_value=1, value=5, step=1)
-    time_stop_target_pct = time_stop_cols[1].number_input("时间退出收益阈值（%）", value=1.0, step=0.1)
+    time_stop_days = time_stop_cols[0].number_input(
+        "最多持有天数 N", min_value=1, value=5, step=1
+    )
+    time_stop_target_pct = time_stop_cols[1].number_input(
+        "时间退出收益阈值（%）", value=1.0, step=0.1
+    )
     exit_mode_cols = st.columns([1.8, 1])
-    time_exit_mode_label = exit_mode_cols[0].selectbox("到期处理", options=["按原规则剔除未达条件信号", "第 N 天按收盘价结束交易"])
-    stop_loss_pct = exit_mode_cols[1].number_input("全仓止损（%）", min_value=0.0, value=3.0, step=0.1)
+    time_exit_mode_label = exit_mode_cols[0].selectbox(
+        "到期处理", options=["按原规则剔除未达条件信号", "第 N 天按收盘价结束交易"]
+    )
+    stop_loss_pct = exit_mode_cols[1].number_input(
+        "全仓止损（%）", min_value=0.0, value=3.0, step=0.1
+    )
     take_profit_cols = st.columns([1.2, 1, 1, 1])
-    enable_take_profit = take_profit_cols[0].checkbox("启用固定止盈（次级）", value=True)
-    take_profit_pct = take_profit_cols[1].number_input("固定止盈（%）", min_value=0.0, value=5.0, step=0.1, disabled=not enable_take_profit)
-    buy_cost_pct = take_profit_cols[2].number_input("买入成本（%）", min_value=0.0, value=0.03, step=0.01, format="%.4f")
-    sell_cost_pct = take_profit_cols[3].number_input("卖出成本（%）", min_value=0.0, value=0.13, step=0.01, format="%.4f")
+    enable_take_profit = take_profit_cols[0].checkbox(
+        "启用固定止盈（次级）", value=True
+    )
+    take_profit_pct = take_profit_cols[1].number_input(
+        "固定止盈（%）",
+        min_value=0.0,
+        value=5.0,
+        step=0.1,
+        disabled=not enable_take_profit,
+    )
+    buy_cost_pct = take_profit_cols[2].number_input(
+        "买入成本（%）", min_value=0.0, value=0.03, step=0.01, format="%.4f"
+    )
+    sell_cost_pct = take_profit_cols[3].number_input(
+        "卖出成本（%）", min_value=0.0, value=0.13, step=0.01, format="%.4f"
+    )
     slippage_cols = st.columns(2)
-    buy_slippage_pct = slippage_cols[0].number_input("买入滑点（%）", min_value=0.0, value=0.0, step=0.01, format="%.4f")
-    sell_slippage_pct = slippage_cols[1].number_input("卖出滑点（%）", min_value=0.0, value=0.0, step=0.01, format="%.4f")
+    buy_slippage_pct = slippage_cols[0].number_input(
+        "买入滑点（%）", min_value=0.0, value=0.0, step=0.01, format="%.4f"
+    )
+    sell_slippage_pct = slippage_cols[1].number_input(
+        "卖出滑点（%）", min_value=0.0, value=0.0, step=0.01, format="%.4f"
+    )
 
 section_header(ADVANCED_SECTION_TITLE, ADVANCED_SECTION_CAPTION)
 with st.expander("信号过滤", expanded=False):
@@ -3126,7 +3465,9 @@ with st.expander("信号过滤", expanded=False):
     board_ma_filter_operator = board_ma_filter_cols[2].selectbox(
         "比较方向",
         options=[">=", "<="],
-        index=[">=", "<="].index(str(factor_control_default("board_ma_filter_operator"))),
+        index=[">=", "<="].index(
+            str(factor_control_default("board_ma_filter_operator"))
+        ),
         format_func=lambda value: BOARD_MA_OPERATOR_LABELS.get(str(value), str(value)),
         disabled=not enable_board_ma_filter,
     )
@@ -3158,9 +3499,12 @@ with st.expander("信号过滤", expanded=False):
             options=imported_filter_options,
             index=0,
             format_func=lambda value: (
-                "请选择指标" if str(value) == "" else imported_filter_labels.get(str(value), str(value))
+                "请选择指标"
+                if str(value) == ""
+                else imported_filter_labels.get(str(value), str(value))
             ),
-            disabled=(not imported_filter_rule_enabled) or len(imported_filter_options) <= 1,
+            disabled=(not imported_filter_rule_enabled)
+            or len(imported_filter_options) <= 1,
             key=f"imported_filter_key_{rule_index}",
         )
         selected_imported_columns = imported_filter_columns.get(
@@ -3170,15 +3514,22 @@ with st.expander("信号过滤", expanded=False):
             f"输出列 {rule_index}",
             options=selected_imported_columns or [""],
             index=0,
-            format_func=lambda value: "请选择输出列" if str(value) == "" else str(value),
-            disabled=(not imported_filter_rule_enabled) or not selected_imported_columns,
+            format_func=lambda value: (
+                "请选择输出列" if str(value) == "" else str(value)
+            ),
+            disabled=(not imported_filter_rule_enabled)
+            or not selected_imported_columns,
             key=f"imported_filter_column_{rule_index}",
         )
         imported_filter_cols[3].selectbox(
             f"比较方向 {rule_index}",
             options=[">=", "<="],
-            index=[">=", "<="].index(str(factor_control_default("imported_indicator_filter_operator"))),
-            format_func=lambda value: IMPORTED_INDICATOR_OPERATOR_LABELS.get(str(value), str(value)),
+            index=[">=", "<="].index(
+                str(factor_control_default("imported_indicator_filter_operator"))
+            ),
+            format_func=lambda value: IMPORTED_INDICATOR_OPERATOR_LABELS.get(
+                str(value), str(value)
+            ),
             disabled=not imported_filter_rule_enabled,
             key=f"imported_filter_operator_{rule_index}",
         )
@@ -3194,18 +3545,26 @@ with st.expander("高级离场", expanded=False):
     enable_profit_drawdown_exit = st.checkbox("启用盈利回撤止盈（整笔）", value=False)
     drawdown_cols = st.columns([1.2, 1, 1])
     profit_drawdown_pct = drawdown_cols[0].number_input(
-        "盈利回撤（%）", min_value=0.0, value=40.0, step=1.0, disabled=not enable_profit_drawdown_exit
+        "盈利回撤（%）",
+        min_value=0.0,
+        value=40.0,
+        step=1.0,
+        disabled=not enable_profit_drawdown_exit,
     )
     min_profit_to_activate_profit_drawdown_pct = drawdown_cols[1].number_input(
         "激活浮盈（%）",
         min_value=0.0,
-        value=float(factor_control_default("min_profit_to_activate_profit_drawdown_pct")),
+        value=float(
+            factor_control_default("min_profit_to_activate_profit_drawdown_pct")
+        ),
         step=0.1,
         disabled=not enable_profit_drawdown_exit,
         key="min_profit_to_activate_profit_drawdown_pct",
     )
     board_ma_exit_cols = st.columns(4)
-    enable_board_ma_exit = board_ma_exit_cols[0].checkbox("启用板块均线离场（整笔）", value=False)
+    enable_board_ma_exit = board_ma_exit_cols[0].checkbox(
+        "启用板块均线离场（整笔）", value=False
+    )
     board_ma_exit_line = board_ma_exit_cols[1].selectbox(
         "离场占比线",
         options=["20", "50"],
@@ -3248,9 +3607,12 @@ with st.expander("高级离场", expanded=False):
             options=imported_exit_options,
             index=0,
             format_func=lambda value: (
-                "请选择指标" if str(value) == "" else imported_exit_labels.get(str(value), str(value))
+                "请选择指标"
+                if str(value) == ""
+                else imported_exit_labels.get(str(value), str(value))
             ),
-            disabled=(not imported_exit_rule_enabled) or len(imported_exit_options) <= 1,
+            disabled=(not imported_exit_rule_enabled)
+            or len(imported_exit_options) <= 1,
             key=f"imported_exit_key_{rule_index}",
         )
         selected_imported_exit_columns = imported_exit_columns.get(
@@ -3260,15 +3622,22 @@ with st.expander("高级离场", expanded=False):
             f"离场输出列 {rule_index}",
             options=selected_imported_exit_columns or [""],
             index=0,
-            format_func=lambda value: "请选择输出列" if str(value) == "" else str(value),
-            disabled=(not imported_exit_rule_enabled) or not selected_imported_exit_columns,
+            format_func=lambda value: (
+                "请选择输出列" if str(value) == "" else str(value)
+            ),
+            disabled=(not imported_exit_rule_enabled)
+            or not selected_imported_exit_columns,
             key=f"imported_exit_column_{rule_index}",
         )
         imported_exit_cols[3].selectbox(
             f"离场比较方向 {rule_index}",
             options=[">=", "<="],
-            index=[">=", "<="].index(str(factor_control_default("imported_indicator_exit_operator"))),
-            format_func=lambda value: IMPORTED_INDICATOR_OPERATOR_LABELS.get(str(value), str(value)),
+            index=[">=", "<="].index(
+                str(factor_control_default("imported_indicator_exit_operator"))
+            ),
+            format_func=lambda value: IMPORTED_INDICATOR_OPERATOR_LABELS.get(
+                str(value), str(value)
+            ),
             disabled=not imported_exit_rule_enabled,
             key=f"imported_exit_operator_{rule_index}",
         )
@@ -3285,7 +3654,9 @@ with st.expander("高级离场", expanded=False):
         "离场均线周期", min_value=1, value=10, step=1, disabled=not enable_ma_exit
     )
     atr_exit_cols = st.columns([1.1, 1, 1, 1])
-    enable_atr_trailing_exit = atr_exit_cols[0].checkbox("启用 ATR 跟踪止盈（整笔）", value=False)
+    enable_atr_trailing_exit = atr_exit_cols[0].checkbox(
+        "启用 ATR 跟踪止盈（整笔）", value=False
+    )
     atr_trailing_period = atr_exit_cols[1].number_input(
         "ATR 跟踪周期",
         min_value=1,
@@ -3318,279 +3689,268 @@ with st.expander("高级离场", expanded=False):
     )
 
 with st.expander("分批止盈", expanded=False):
-        st.caption("仅在需要拆分仓位管理时启用，按 priority 从小到大执行。")
-        partial_top_cols = st.columns([1, 1])
-        partial_exit_enabled = partial_top_cols[0].checkbox(
-            "启用分批止盈", value=False, key="partial_exit_enabled"
-        )
-        partial_exit_count = partial_top_cols[1].number_input(
-            "分批数量",
-            min_value=2,
-            max_value=3,
-            value=2,
-            step=1,
-            disabled=not partial_exit_enabled,
-        )
-        partial_rule_inputs = []
-        partial_indicator_registry = load_indicator_registry_preview()
-        (
-            partial_indicator_options,
-            partial_indicator_columns,
-            partial_indicator_labels,
-        ) = imported_indicator_exit_options(partial_indicator_registry)
-        batch_tabs = st.tabs(
-            [f"第 {i} 批" for i in range(1, int(partial_exit_count) + 1)]
-        )
-        for i, batch_tab in enumerate(batch_tabs, start=1):
-            with batch_tab:
-                c1, c2, c3 = st.columns([1, 1.25, 1.1])
-                weight_default = (
-                    50.0 if int(partial_exit_count) == 2 else [30.0, 30.0, 40.0][i - 1]
-                )
-                mode_default = (
-                    ["fixed_tp", "ma_exit"][i - 1]
-                    if int(partial_exit_count) == 2
-                    else ["fixed_tp", "fixed_tp", "ma_exit"][i - 1]
-                )
-                mode_options = [
-                    "fixed_tp",
-                    "ma_exit",
-                    "profit_drawdown",
-                    "atr_trailing",
-                    "indicator_threshold",
-                ]
-                weight_pct = c1.number_input(
-                    f"仓位比例（第{i}批）",
-                    min_value=0.0,
-                    max_value=100.0,
-                    value=weight_default,
-                    step=1.0,
-                    disabled=not partial_exit_enabled,
-                    key=f"p_weight_{i}",
-                )
-                priority = c1.number_input(
-                    f"执行优先级（第{i}批）",
-                    min_value=1,
-                    max_value=10,
-                    value=i,
-                    step=1,
-                    disabled=not partial_exit_enabled,
-                    key=f"p_priority_{i}",
-                )
-                mode = c2.selectbox(
-                    f"退出方式（第{i}批）",
-                    options=mode_options,
-                    index=mode_options.index(mode_default),
-                    format_func=lambda value: str(
-                        PARTIAL_EXIT_MODE_LABELS.get(value, value) or value
+    st.caption("仅在需要拆分仓位管理时启用，按 priority 从小到大执行。")
+    partial_top_cols = st.columns([1, 1])
+    partial_exit_enabled = partial_top_cols[0].checkbox(
+        "启用分批止盈", value=False, key="partial_exit_enabled"
+    )
+    partial_exit_count = partial_top_cols[1].number_input(
+        "分批数量",
+        min_value=2,
+        max_value=3,
+        value=2,
+        step=1,
+        disabled=not partial_exit_enabled,
+    )
+    partial_rule_inputs = []
+    partial_indicator_registry = load_indicator_registry_preview()
+    (
+        partial_indicator_options,
+        partial_indicator_columns,
+        partial_indicator_labels,
+    ) = imported_indicator_exit_options(partial_indicator_registry)
+    batch_tabs = st.tabs([f"第 {i} 批" for i in range(1, int(partial_exit_count) + 1)])
+    for i, batch_tab in enumerate(batch_tabs, start=1):
+        with batch_tab:
+            c1, c2, c3 = st.columns([1, 1.25, 1.1])
+            weight_default = (
+                50.0 if int(partial_exit_count) == 2 else [30.0, 30.0, 40.0][i - 1]
+            )
+            mode_default = (
+                ["fixed_tp", "ma_exit"][i - 1]
+                if int(partial_exit_count) == 2
+                else ["fixed_tp", "fixed_tp", "ma_exit"][i - 1]
+            )
+            mode_options = [
+                "fixed_tp",
+                "ma_exit",
+                "profit_drawdown",
+                "atr_trailing",
+                "indicator_threshold",
+            ]
+            weight_pct = c1.number_input(
+                f"仓位比例（第{i}批）",
+                min_value=0.0,
+                max_value=100.0,
+                value=weight_default,
+                step=1.0,
+                disabled=not partial_exit_enabled,
+                key=f"p_weight_{i}",
+            )
+            priority = c1.number_input(
+                f"执行优先级（第{i}批）",
+                min_value=1,
+                max_value=10,
+                value=i,
+                step=1,
+                disabled=not partial_exit_enabled,
+                key=f"p_priority_{i}",
+            )
+            mode = c2.selectbox(
+                f"退出方式（第{i}批）",
+                options=mode_options,
+                index=mode_options.index(mode_default),
+                format_func=lambda value: str(
+                    PARTIAL_EXIT_MODE_LABELS.get(value, value) or value
+                ),
+                disabled=not partial_exit_enabled,
+                key=f"p_mode_{i}",
+            )
+            tp = c3.number_input(
+                f"目标收益（第{i}批）%",
+                value=5.0,
+                step=0.1,
+                disabled=(not partial_exit_enabled) or mode != "fixed_tp",
+                key=f"p_tp_{i}",
+            )
+            ma = c3.number_input(
+                f"均线周期（第{i}批）",
+                min_value=1,
+                value=10,
+                step=1,
+                disabled=(not partial_exit_enabled) or mode != "ma_exit",
+                key=f"p_ma_{i}",
+            )
+            dd = c3.number_input(
+                f"回撤比例（第{i}批）%",
+                min_value=0.0,
+                value=20.0,
+                step=0.1,
+                disabled=(not partial_exit_enabled) or mode != "profit_drawdown",
+                key=f"p_dd_{i}",
+            )
+            mpa = c2.number_input(
+                f"激活浮盈（第{i}批）%",
+                min_value=0.0,
+                value=5.0,
+                step=0.1,
+                disabled=(not partial_exit_enabled) or mode != "profit_drawdown",
+                key=f"p_mpa_{i}",
+            )
+            atr_period = c3.number_input(
+                f"ATR 周期（第{i}批）",
+                min_value=1,
+                value=14,
+                step=1,
+                disabled=(not partial_exit_enabled) or mode != "atr_trailing",
+                key=f"p_atr_period_{i}",
+            )
+            atr_multiplier = c2.number_input(
+                f"ATR 倍数（第{i}批）",
+                min_value=0.1,
+                value=3.0,
+                step=0.1,
+                disabled=(not partial_exit_enabled) or mode != "atr_trailing",
+                key=f"p_atr_multiplier_{i}",
+            )
+            indicator_selector_cols = st.columns([1.3, 1.4, 1, 1])
+            partial_indicator_key = indicator_selector_cols[0].selectbox(
+                f"导入指标（第{i}批）",
+                options=partial_indicator_options,
+                index=0,
+                format_func=lambda value: (
+                    "请选择指标"
+                    if str(value) == ""
+                    else partial_indicator_labels.get(str(value), str(value))
+                ),
+                disabled=(not partial_exit_enabled) or mode != "indicator_threshold",
+                key=f"p_indicator_key_{i}",
+            )
+            selected_partial_indicator_columns = partial_indicator_columns.get(
+                str(partial_indicator_key), []
+            )
+            indicator_selector_cols[1].selectbox(
+                f"输出列（第{i}批）",
+                options=selected_partial_indicator_columns or [""],
+                index=0,
+                format_func=lambda value: (
+                    "请选择输出列" if str(value) == "" else str(value)
+                ),
+                disabled=(not partial_exit_enabled)
+                or mode != "indicator_threshold"
+                or not selected_partial_indicator_columns,
+                key=f"p_indicator_column_{i}",
+            )
+            indicator_selector_cols[2].selectbox(
+                f"比较方向（第{i}批）",
+                options=[">=", "<="],
+                index=0,
+                format_func=lambda value: IMPORTED_INDICATOR_OPERATOR_LABELS.get(
+                    str(value), str(value)
+                ),
+                disabled=(not partial_exit_enabled) or mode != "indicator_threshold",
+                key=f"p_indicator_operator_{i}",
+            )
+            indicator_selector_cols[3].number_input(
+                f"阈值（第{i}批）",
+                value=0.0,
+                step=0.1,
+                disabled=(not partial_exit_enabled) or mode != "indicator_threshold",
+                key=f"p_indicator_threshold_{i}",
+            )
+            partial_rule_inputs.append(
+                {
+                    "enabled": bool(partial_exit_enabled),
+                    "weight_pct": float(weight_pct),
+                    "mode": mode,
+                    "priority": int(priority),
+                    "target_profit_pct": float(tp) if mode == "fixed_tp" else None,
+                    "ma_period": int(ma) if mode == "ma_exit" else None,
+                    "drawdown_pct": float(dd) if mode == "profit_drawdown" else None,
+                    "min_profit_to_activate_drawdown": float(mpa)
+                    if mode == "profit_drawdown"
+                    else None,
+                    "atr_period": int(atr_period) if mode == "atr_trailing" else None,
+                    "atr_multiplier": float(atr_multiplier)
+                    if mode == "atr_trailing"
+                    else None,
+                    **(
+                        build_partial_indicator_rule(i)
+                        if mode == "indicator_threshold"
+                        else {
+                            "indicator_key": None,
+                            "indicator_column": None,
+                            "indicator_operator": None,
+                            "indicator_threshold": None,
+                        }
                     ),
-                    disabled=not partial_exit_enabled,
-                    key=f"p_mode_{i}",
-                )
-                tp = c3.number_input(
-                    f"目标收益（第{i}批）%",
-                    value=5.0,
-                    step=0.1,
-                    disabled=(not partial_exit_enabled) or mode != "fixed_tp",
-                    key=f"p_tp_{i}",
-                )
-                ma = c3.number_input(
-                    f"均线周期（第{i}批）",
-                    min_value=1,
-                    value=10,
-                    step=1,
-                    disabled=(not partial_exit_enabled) or mode != "ma_exit",
-                    key=f"p_ma_{i}",
-                )
-                dd = c3.number_input(
-                    f"回撤比例（第{i}批）%",
-                    min_value=0.0,
-                    value=20.0,
-                    step=0.1,
-                    disabled=(not partial_exit_enabled) or mode != "profit_drawdown",
-                    key=f"p_dd_{i}",
-                )
-                mpa = c2.number_input(
-                    f"激活浮盈（第{i}批）%",
-                    min_value=0.0,
-                    value=5.0,
-                    step=0.1,
-                    disabled=(not partial_exit_enabled) or mode != "profit_drawdown",
-                    key=f"p_mpa_{i}",
-                )
-                atr_period = c3.number_input(
-                    f"ATR 周期（第{i}批）",
-                    min_value=1,
-                    value=14,
-                    step=1,
-                    disabled=(not partial_exit_enabled) or mode != "atr_trailing",
-                    key=f"p_atr_period_{i}",
-                )
-                atr_multiplier = c2.number_input(
-                    f"ATR 倍数（第{i}批）",
-                    min_value=0.1,
-                    value=3.0,
-                    step=0.1,
-                    disabled=(not partial_exit_enabled) or mode != "atr_trailing",
-                    key=f"p_atr_multiplier_{i}",
-                )
-                indicator_selector_cols = st.columns([1.3, 1.4, 1, 1])
-                partial_indicator_key = indicator_selector_cols[0].selectbox(
-                    f"导入指标（第{i}批）",
-                    options=partial_indicator_options,
-                    index=0,
-                    format_func=lambda value: (
-                        "请选择指标"
-                        if str(value) == ""
-                        else partial_indicator_labels.get(str(value), str(value))
-                    ),
-                    disabled=(not partial_exit_enabled)
-                    or mode != "indicator_threshold",
-                    key=f"p_indicator_key_{i}",
-                )
-                selected_partial_indicator_columns = partial_indicator_columns.get(
-                    str(partial_indicator_key), []
-                )
-                indicator_selector_cols[1].selectbox(
-                    f"输出列（第{i}批）",
-                    options=selected_partial_indicator_columns or [""],
-                    index=0,
-                    format_func=lambda value: (
-                        "请选择输出列" if str(value) == "" else str(value)
-                    ),
-                    disabled=(not partial_exit_enabled)
-                    or mode != "indicator_threshold"
-                    or not selected_partial_indicator_columns,
-                    key=f"p_indicator_column_{i}",
-                )
-                indicator_selector_cols[2].selectbox(
-                    f"比较方向（第{i}批）",
-                    options=[">=", "<="],
-                    index=0,
-                    format_func=lambda value: IMPORTED_INDICATOR_OPERATOR_LABELS.get(
-                        str(value), str(value)
-                    ),
-                    disabled=(not partial_exit_enabled)
-                    or mode != "indicator_threshold",
-                    key=f"p_indicator_operator_{i}",
-                )
-                indicator_selector_cols[3].number_input(
-                    f"阈值（第{i}批）",
-                    value=0.0,
-                    step=0.1,
-                    disabled=(not partial_exit_enabled)
-                    or mode != "indicator_threshold",
-                    key=f"p_indicator_threshold_{i}",
-                )
-                partial_rule_inputs.append(
-                    {
-                        "enabled": bool(partial_exit_enabled),
-                        "weight_pct": float(weight_pct),
-                        "mode": mode,
-                        "priority": int(priority),
-                        "target_profit_pct": float(tp) if mode == "fixed_tp" else None,
-                        "ma_period": int(ma) if mode == "ma_exit" else None,
-                        "drawdown_pct": float(dd)
-                        if mode == "profit_drawdown"
-                        else None,
-                        "min_profit_to_activate_drawdown": float(mpa)
-                        if mode == "profit_drawdown"
-                        else None,
-                        "atr_period": int(atr_period)
-                        if mode == "atr_trailing"
-                        else None,
-                        "atr_multiplier": float(atr_multiplier)
-                        if mode == "atr_trailing"
-                        else None,
-                        **(
-                            build_partial_indicator_rule(i)
-                            if mode == "indicator_threshold"
-                            else {
-                                "indicator_key": None,
-                                "indicator_column": None,
-                                "indicator_operator": None,
-                                "indicator_threshold": None,
-                            }
-                        ),
-                    }
-                )
+                }
+            )
 
 with st.expander("参数扫描与字段映射", expanded=False):
-        st.caption("适合做参数边界探索；建议先用少量组合验证，再扩大扫描范围。")
-        st.caption(
-            "当分批止盈开启时，可扫描“第X批目标收益/均线周期/回撤比例/激活浮盈”。"
+    st.caption("适合做参数边界探索；建议先用少量组合验证，再扩大扫描范围。")
+    st.caption("当分批止盈开启时，可扫描“第X批目标收益/均线周期/回撤比例/激活浮盈”。")
+    scan_field_options = build_factor_scan_field_options(str(entry_factor))
+    reset_invalid_scan_axis_state(scan_field_options)
+    scan_top_cols = st.columns([1.6, 1])
+    with scan_top_cols[0]:
+        scan_enabled = st.checkbox("启用参数扫描", value=False)
+        scan_metric = st.selectbox(
+            "扫描排序指标",
+            options=list(SCAN_METRICS),
+            format_func=lambda value: str(
+                SCAN_METRIC_LABELS.get(value, value) or value
+            ),
+            disabled=not scan_enabled,
         )
-        scan_field_options = build_factor_scan_field_options(str(entry_factor))
-        reset_invalid_scan_axis_state(scan_field_options)
-        scan_top_cols = st.columns([1.6, 1])
-        with scan_top_cols[0]:
-            scan_enabled = st.checkbox("启用参数扫描", value=False)
-            scan_metric = st.selectbox(
-                "扫描排序指标",
-                options=list(SCAN_METRICS),
-                format_func=lambda value: str(
-                    SCAN_METRIC_LABELS.get(value, value) or value
-                ),
-                disabled=not scan_enabled,
-            )
-        with scan_top_cols[1]:
-            scan_max_combinations = st.number_input(
-                "最大组合数",
-                min_value=1,
-                max_value=100,
-                value=25,
-                step=1,
-                disabled=not scan_enabled,
-            )
-        scan_axis_cols = st.columns(2)
-        with scan_axis_cols[0]:
-            scan_axis_1 = st.selectbox(
-                "扫描维度 1",
-                options=scan_field_options,
-                format_func=lambda value: str(
-                    "请选择字段"
-                    if value == ""
-                    else (SCAN_FIELD_LABELS.get(value, value) or value)
-                ),
-                disabled=not scan_enabled,
-                key="scan_axis_1_field",
-            )
-            scan_axis_1_values = st.text_input(
-                "维度 1 取值",
-                value="",
-                disabled=not scan_enabled,
-                help="使用逗号分隔，例如 2,3,4",
-                key="scan_axis_1_values",
-            )
-        with scan_axis_cols[1]:
-            scan_axis_2 = st.selectbox(
-                "扫描维度 2（可选）",
-                options=scan_field_options,
-                format_func=lambda value: str(
-                    "不启用第二维"
-                    if value == ""
-                    else (SCAN_FIELD_LABELS.get(value, value) or value)
-                ),
-                disabled=not scan_enabled,
-                key="scan_axis_2_field",
-            )
-            scan_axis_2_values = st.text_input(
-                "维度 2 取值",
-                value="",
-                disabled=not scan_enabled,
-                help="留空表示只扫描一维",
-                key="scan_axis_2_values",
-            )
-        st.markdown("**字段映射（可选）**")
-        st.caption("仅在导入文件列名不标准时填写，常规本地 parquet 回测无需改动。")
-        mc1, mc2, mc3 = st.columns(3)
-        date_column = mc1.text_input("日期列名", value="")
-        stock_code_column = mc1.text_input("股票代码列名", value="")
-        open_column = mc1.text_input("开盘价列名", value="")
-        high_column = mc2.text_input("最高价列名", value="")
-        low_column = mc2.text_input("最低价列名", value="")
-        close_column = mc2.text_input("收盘价列名", value="")
-        volume_column = mc3.text_input("成交量列名", value="")
+    with scan_top_cols[1]:
+        scan_max_combinations = st.number_input(
+            "最大组合数",
+            min_value=1,
+            max_value=100,
+            value=25,
+            step=1,
+            disabled=not scan_enabled,
+        )
+    scan_axis_cols = st.columns(2)
+    with scan_axis_cols[0]:
+        scan_axis_1 = st.selectbox(
+            "扫描维度 1",
+            options=scan_field_options,
+            format_func=lambda value: str(
+                "请选择字段"
+                if value == ""
+                else (SCAN_FIELD_LABELS.get(value, value) or value)
+            ),
+            disabled=not scan_enabled,
+            key="scan_axis_1_field",
+        )
+        scan_axis_1_values = st.text_input(
+            "维度 1 取值",
+            value="",
+            disabled=not scan_enabled,
+            help="使用逗号分隔，例如 2,3,4",
+            key="scan_axis_1_values",
+        )
+    with scan_axis_cols[1]:
+        scan_axis_2 = st.selectbox(
+            "扫描维度 2（可选）",
+            options=scan_field_options,
+            format_func=lambda value: str(
+                "不启用第二维"
+                if value == ""
+                else (SCAN_FIELD_LABELS.get(value, value) or value)
+            ),
+            disabled=not scan_enabled,
+            key="scan_axis_2_field",
+        )
+        scan_axis_2_values = st.text_input(
+            "维度 2 取值",
+            value="",
+            disabled=not scan_enabled,
+            help="留空表示只扫描一维",
+            key="scan_axis_2_values",
+        )
+    st.markdown("**字段映射（可选）**")
+    st.caption("仅在导入文件列名不标准时填写，常规本地 parquet 回测无需改动。")
+    mc1, mc2, mc3 = st.columns(3)
+    date_column = mc1.text_input("日期列名", value="")
+    stock_code_column = mc1.text_input("股票代码列名", value="")
+    open_column = mc1.text_input("开盘价列名", value="")
+    high_column = mc2.text_input("最高价列名", value="")
+    low_column = mc2.text_input("最低价列名", value="")
+    close_column = mc2.text_input("收盘价列名", value="")
+    volume_column = mc3.text_input("成交量列名", value="")
 
 if submitted:
     clear_result_state()
@@ -3867,49 +4227,47 @@ if submitted:
                 drawdown_contributors_df = result_bundle.drawdown_contributors_df
                 anomaly_queue_df = result_bundle.anomaly_queue_df
             st.success("回测完成")
-            st.session_state["detail_df"] = detail_df
             st.session_state["signal_trace_df"] = signal_trace_df
             st.session_state["rejected_signal_df"] = rejected_signal_df
-            st.session_state["daily_df"] = daily_df
-            st.session_state["equity_df"] = equity_df
-            st.session_state["trade_behavior_df"] = trade_behavior_df
-            st.session_state["drawdown_episodes_df"] = drawdown_episodes_df
-            st.session_state["drawdown_contributors_df"] = drawdown_contributors_df
-            st.session_state["anomaly_queue_df"] = anomaly_queue_df
-            st.session_state["stats"] = stats
-            st.session_state["scan_df"] = scan_df
-            st.session_state["scan_metric"] = params.scan_config.metric
-            st.session_state["scan_axis_fields"] = [
-                axis.field_name for axis in params.scan_config.axes
-            ]
-            st.session_state["best_scan_overrides"] = best_scan_overrides
-            st.session_state["per_stock_stats_df"] = per_stock_stats_df
-            st.session_state["batch_backtest_mode"] = result_bundle.batch_backtest_mode
-            st.session_state["excel_bytes"] = excel_bytes
-            st.session_state["download_name"] = build_download_name(
-                params.start_date, params.end_date
+            store_backtest_result_state(
+                detail_df=detail_df,
+                daily_df=daily_df,
+                equity_df=equity_df,
+                trade_behavior_df=trade_behavior_df,
+                drawdown_episodes_df=drawdown_episodes_df,
+                drawdown_contributors_df=drawdown_contributors_df,
+                anomaly_queue_df=anomaly_queue_df,
+                stats=stats,
+                scan_df=scan_df,
+                scan_metric=params.scan_config.metric,
+                scan_axis_fields=[axis.field_name for axis in params.scan_config.axes],
+                best_scan_overrides=best_scan_overrides,
+                excel_bytes=excel_bytes,
+                download_name=build_download_name(params.start_date, params.end_date),
+                per_stock_stats_df=per_stock_stats_df,
+                batch_backtest_mode=result_bundle.batch_backtest_mode,
+                result_params_snapshot=build_result_params_snapshot(params),
             )
         except Exception as exc:
             st.error(f"回测失败：{exc}")
 
-detail_df = st.session_state.get("detail_df", pd.DataFrame())
-signal_trace_df = st.session_state.get("signal_trace_df", pd.DataFrame())
-rejected_signal_df = st.session_state.get("rejected_signal_df", pd.DataFrame())
-daily_df = st.session_state.get("daily_df", pd.DataFrame())
-equity_df = st.session_state.get("equity_df", pd.DataFrame())
-trade_behavior_df = st.session_state.get("trade_behavior_df", pd.DataFrame())
-drawdown_episodes_df = st.session_state.get("drawdown_episodes_df", pd.DataFrame())
-drawdown_contributors_df = st.session_state.get(
-    "drawdown_contributors_df", pd.DataFrame()
-)
-anomaly_queue_df = st.session_state.get("anomaly_queue_df", pd.DataFrame())
-stats = st.session_state.get("stats", {})
-scan_df = st.session_state.get("scan_df", pd.DataFrame())
-scan_metric = str(st.session_state.get("scan_metric", "total_return_pct"))
-scan_axis_fields = list(st.session_state.get("scan_axis_fields", []))
-best_scan_overrides = dict(st.session_state.get("best_scan_overrides", {}))
-per_stock_stats_df = st.session_state.get("per_stock_stats_df", pd.DataFrame())
-batch_backtest_mode = str(st.session_state.get("batch_backtest_mode", "combined"))
+result_state = load_backtest_result_state()
+detail_df = cast(pd.DataFrame, result_state["detail_df"])
+signal_trace_df = cast(pd.DataFrame, result_state["signal_trace_df"])
+rejected_signal_df = cast(pd.DataFrame, result_state["rejected_signal_df"])
+daily_df = cast(pd.DataFrame, result_state["daily_df"])
+equity_df = cast(pd.DataFrame, result_state["equity_df"])
+trade_behavior_df = cast(pd.DataFrame, result_state["trade_behavior_df"])
+drawdown_episodes_df = cast(pd.DataFrame, result_state["drawdown_episodes_df"])
+drawdown_contributors_df = cast(pd.DataFrame, result_state["drawdown_contributors_df"])
+anomaly_queue_df = cast(pd.DataFrame, result_state["anomaly_queue_df"])
+stats = cast(dict[str, Any], result_state["stats"])
+scan_df = cast(pd.DataFrame, result_state["scan_df"])
+scan_metric = str(result_state["scan_metric"])
+scan_axis_fields = cast(list[str], result_state["scan_axis_fields"])
+best_scan_overrides = cast(dict[str, Any], result_state["best_scan_overrides"])
+per_stock_stats_df = cast(pd.DataFrame, result_state["per_stock_stats_df"])
+batch_backtest_mode = str(result_state["batch_backtest_mode"])
 
 if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
     tab_names = build_result_tab_names(
@@ -4155,10 +4513,22 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
             st.info("暂无诊断数据")
 
     with tab_details:
-        imported_filter_count = sum(
-            1
-            for rule_index in range(1, 4)
-            if bool(st.session_state.get(f"imported_filter_rule_enabled_{rule_index}", False))
+        result_params_snapshot = cast(
+            dict[str, object], result_state["result_params_snapshot"]
+        )
+        imported_filter_count = int(
+            result_params_snapshot.get(
+                "imported_filter_count",
+                sum(
+                    1
+                    for rule_index in range(1, 4)
+                    if bool(
+                        st.session_state.get(
+                            f"imported_filter_rule_enabled_{rule_index}", False
+                        )
+                    )
+                ),
+            )
         )
         render_trade_explanations(
             signal_trace_df=signal_trace_df,
@@ -4173,19 +4543,46 @@ if isinstance(detail_df, pd.DataFrame) and "excel_bytes" in st.session_state:
             format_timestamp=format_timestamp_for_display,
             format_number=format_number,
             format_percent=format_percent,
-            entry_factor=str(entry_factor),
-            use_ma_filter=bool(use_ma_filter),
-            fast_ma_period=int(fast_ma_period),
-            slow_ma_period=int(slow_ma_period),
-            enable_atr_filter=bool(enable_atr_filter),
-            min_atr_filter_pct=float(min_atr_filter_pct),
-            max_atr_filter_pct=float(max_atr_filter_pct),
-            enable_board_ma_filter=bool(enable_board_ma_filter),
-            board_ma_filter_line=str(board_ma_filter_line),
-            board_ma_filter_operator=str(board_ma_filter_operator),
-            board_ma_filter_threshold=float(board_ma_filter_threshold),
-            imported_filter_count=int(imported_filter_count),
+            entry_factor=str(result_params_snapshot.get("entry_factor", entry_factor)),
+            use_ma_filter=bool(
+                result_params_snapshot.get("use_ma_filter", use_ma_filter)
+            ),
+            fast_ma_period=int(
+                result_params_snapshot.get("fast_ma_period", fast_ma_period)
+            ),
+            slow_ma_period=int(
+                result_params_snapshot.get("slow_ma_period", slow_ma_period)
+            ),
+            enable_atr_filter=bool(
+                result_params_snapshot.get("enable_atr_filter", enable_atr_filter)
+            ),
+            min_atr_filter_pct=float(
+                result_params_snapshot.get("min_atr_filter_pct", min_atr_filter_pct)
+            ),
+            max_atr_filter_pct=float(
+                result_params_snapshot.get("max_atr_filter_pct", max_atr_filter_pct)
+            ),
+            enable_board_ma_filter=bool(
+                result_params_snapshot.get(
+                    "enable_board_ma_filter", enable_board_ma_filter
+                )
+            ),
+            board_ma_filter_line=str(
+                result_params_snapshot.get("board_ma_filter_line", board_ma_filter_line)
+            ),
+            board_ma_filter_operator=str(
+                result_params_snapshot.get(
+                    "board_ma_filter_operator", board_ma_filter_operator
+                )
+            ),
+            board_ma_filter_threshold=float(
+                result_params_snapshot.get(
+                    "board_ma_filter_threshold", board_ma_filter_threshold
+                )
+            ),
+            imported_filter_count=imported_filter_count,
         )
+
         if isinstance(detail_df, pd.DataFrame) and not detail_df.empty:
             dataframe_stretch(
                 format_detail_for_display(detail_df),

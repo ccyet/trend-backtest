@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from models import AnalysisParams, ImportedIndicatorRule, ParamScanConfig
+from models import (
+    AnalysisParams,
+    ImportedIndicatorRule,
+    ParamScanConfig,
+    validate_params,
+)
 
 
 def make_params(**overrides):
@@ -36,7 +41,9 @@ def make_params(**overrides):
         buy_cost_pct=0.03,
         sell_cost_pct=0.13,
         time_exit_mode="strict",
-        scan_config=ParamScanConfig(enabled=False, axes=(), metric="total_return_pct", max_combinations=25),
+        scan_config=ParamScanConfig(
+            enabled=False, axes=(), metric="total_return_pct", max_combinations=25
+        ),
     )
     base.update(overrides)
     return AnalysisParams(**base)
@@ -76,3 +83,10 @@ def test_imported_indicator_exit_master_switch_disables_rules() -> None:
     )
 
     assert params.effective_imported_indicator_exits == ()
+
+
+def test_validate_params_rejects_timeframe_outside_strategy_capability() -> None:
+    params = make_params(entry_factor="gap", timeframe="30m")
+    errors, warnings = validate_params(params)
+    assert "gap 仅支持 timeframe=1d。" in errors
+    assert warnings == []

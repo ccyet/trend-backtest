@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from config.strategy_capability import get_supported_strategy_timeframes
+
 
 GAP_ENTRY_MODES = ("strict_break", "open_vs_prev_close_threshold")
 ENTRY_FACTORS = (
@@ -652,6 +654,11 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.entry_factor not in ENTRY_FACTORS:
         errors.append("入场因子不合法。")
+    else:
+        supported_timeframes = get_supported_strategy_timeframes(params.entry_factor)
+        if params.timeframe not in supported_timeframes:
+            supported_label = " / ".join(supported_timeframes)
+            errors.append(f"{params.entry_factor} 仅支持 timeframe={supported_label}。")
 
     if params.entry_factor == "gap":
         if params.gap_entry_mode not in GAP_ENTRY_MODES:
