@@ -18,6 +18,9 @@ def test_app_exposes_new_strategy_modes_and_intraday_timeframe_support() -> None
     assert "连续K线追势" in entry_factor.options
     assert "连续K线加速追势" in entry_factor.options
     assert "早盘冲高高位横盘突破" in entry_factor.options
+    assert "Brooks 趋势回撤 H2/L2" in entry_factor.options
+    assert "Brooks 交易区间失败突破" in entry_factor.options
+    assert "Brooks 主要趋势反转" in entry_factor.options
 
     timeframe = app.selectbox(key="timeframe")
     assert timeframe.label == "周期"
@@ -56,6 +59,16 @@ def test_app_exposes_new_strategy_modes_and_intraday_timeframe_support() -> None
         in captions
     )
     assert "相似阶段研究会优先使用 1d 和 30m 的本地 parquet 数据。" in captions
+
+
+def test_app_exposes_chinese_brooks_direction_labels() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    app.selectbox(key="entry_factor").set_value("brooks_trend_pullback")
+    app.run()
+    direction = app.selectbox(key="direction_label")
+    assert direction.options == ["牛趋势 H2 回撤买入", "熊趋势 L2 回撤卖出"]
 
 
 def test_app_updates_direction_options_for_acceleration_mode() -> None:

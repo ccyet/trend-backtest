@@ -38,7 +38,7 @@ STRATEGY_CAPABILITIES: dict[str, StrategyCapability] = {
     ),
     "brooks_trend_pullback": StrategyCapability(
         supported_timeframes=("1d",),
-        summary="Brooks 趋势两段回撤当前仅开放日线回测。",
+        summary="Brooks 趋势回撤 H2/L2 当前仅开放日线回测。",
     ),
     "brooks_trading_range_reversal": StrategyCapability(
         supported_timeframes=("1d",),

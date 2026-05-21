@@ -10,15 +10,15 @@
 - 支持 **本地 Parquet / SQLite / Excel/CSV** 作为回测输入
 - 支持 **TDX 量化能力接入**：历史 K 线更新、通达信公式导入本地指标 parquet
 - 当前共有 9 类入场因子：
-  - `gap`
-  - `trend_breakout`
-  - `volatility_contraction_breakout`
-  - `candle_run`
-  - `candle_run_acceleration`
-  - `early_surge_high_base`
-  - `brooks_trend_pullback`
-  - `brooks_trading_range_reversal`
-  - `brooks_major_trend_reversal`
+  - 跳空
+  - 趋势突破
+  - 波动收缩突破
+  - 连续K线追势
+  - 连续K线加速追势
+  - 早盘冲高高位横盘突破
+  - Brooks 趋势回撤 H2/L2
+  - Brooks 交易区间失败突破
+  - Brooks 主要趋势反转
 - 导入指标当前可用于：
   - 开仓过滤
   - 整笔离场
@@ -48,9 +48,9 @@
   - `candle_run`（连续K线追势）
   - `candle_run_acceleration`（连续K线加速追势）
   - `early_surge_high_base`（早盘冲高高位横盘突破）
-  - `brooks_trend_pullback`（Brooks 趋势两段回撤）
-  - `brooks_trading_range_reversal`（Brooks 交易区间失败突破）
-  - `brooks_major_trend_reversal`（Brooks 主要趋势反转）
+  - Brooks 趋势回撤 H2/L2（内部值 `brooks_trend_pullback`）
+  - Brooks 交易区间失败突破（内部值 `brooks_trading_range_reversal`）
+  - Brooks 主要趋势反转（内部值 `brooks_major_trend_reversal`）
 - **退出风控体系**
   - 全仓止损
   - 分批退出（2~3 批，按优先级）
@@ -73,15 +73,15 @@
 2. `candle_run_acceleration`
    - 在 `candle_run` 基础上增加“实体强度不递减”的加速约束
    - 适合研究更强势的连续推进场景
-3. `brooks_trend_pullback`
+3. Brooks 趋势回撤 H2/L2
    - 对应 Brooks 的趋势中 H2 / L2 回撤再入场思想
-   - 先确认趋势背景，再要求回撤窗口内出现足够逆势 K 线，并在信号棒突破时进场
-4. `brooks_trading_range_reversal`
+   - 先确认趋势背景，再要求两次顺趋势尝试、足够逆势回撤和合格信号棒，并在下一根突破信号棒高/低点时进场
+4. Brooks 交易区间失败突破
    - 对应 Brooks 的交易区间上沿/下沿失败突破
-   - 先用区间宽度确认可交易区间，再交易极端假突破回到区间后的反向触发
-5. `brooks_major_trend_reversal`
+   - 先用区间宽度确认可交易区间，再交易区间极端假突破收回后的反向触发；弱信号棒不触发
+5. Brooks 主要趋势反转
    - 对应 Brooks 的主要趋势反转
-   - 旧趋势先衰竭并被均线结构打破，再回测旧极端失败后才触发
+   - 旧趋势先被均线/通道结构打破，再回测旧极端失败，并用反向强信号棒触发
 
 这些方案都已完成参数接线、UI 暴露、信号生成、策略统计与测试覆盖；`30m / 15m` 当前仍作为周期插座保留，未宣称已完成完整多周期回测。
 
@@ -115,7 +115,7 @@
 
 所有入场触发依据都使用 **T-1 及更早**数据构建；T 日只用于判定是否触发成交。
 
-### 2.2 六类入场因子
+### 2.2 九类入场因子
 
 #### A) `gap`（兼容原行为）
 
@@ -165,9 +165,29 @@
   - 仅支持 `local_parquet`
   - 仅支持 `gap_direction=up`
 
+#### G) Brooks 趋势回撤 H2/L2
+
+- 内部值保持 `brooks_trend_pullback`，用户界面与文档使用中文策略名
+- long：牛趋势背景下识别 H2，两次顺趋势尝试 + 至少两根逆势回撤 + 合格牛信号棒
+- short：熊趋势背景下识别 L2，两次顺趋势尝试 + 至少两根逆势回撤 + 合格熊信号棒
+- 触发方式：下一根 K 线突破信号棒高/低点后按 stop-entry 成交
+
+#### H) Brooks 交易区间失败突破
+
+- 内部值保持 `brooks_trading_range_reversal`
+- 先确认交易区间宽度，再只在区间上沿/下沿的失败突破处反向交易
+- 失败突破必须收回区间内，并具备反向信号棒质量；区间中部噪声不作为信号
+
+#### I) Brooks 主要趋势反转
+
+- 内部值保持 `brooks_major_trend_reversal`
+- long：旧熊趋势成立 → 向上破均线/通道 → 回测旧低点失败 → 牛信号棒突破
+- short：旧牛趋势成立 → 向下破均线/通道 → 回测旧高点失败 → 熊信号棒突破
+- 触发方式仍为突破反转信号棒高/低点的 stop-entry
+
 ### 2.3 成交模型（按因子区分）
 
-突破类（`trend_breakout` / `volatility_contraction_breakout`）采用 stop-entry：
+突破类（`trend_breakout` / `volatility_contraction_breakout`）与三类 Brooks 策略均采用 stop-entry：
 
 - **long**
   1. `open >= trigger` → 按 `open` 成交

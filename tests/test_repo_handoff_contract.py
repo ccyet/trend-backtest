@@ -12,10 +12,19 @@ def test_readme_records_selected_strategy_variants() -> None:
     assert "## 1.1 本次新增方案的落地选择" in readme
     assert "candle_run" in readme
     assert "candle_run_acceleration" in readme
-    assert "brooks_trend_pullback" in readme
-    assert "brooks_trading_range_reversal" in readme
-    assert "brooks_major_trend_reversal" in readme
+    assert "Brooks 趋势回撤 H2/L2" in readme
+    assert "Brooks 交易区间失败突破" in readme
+    assert "Brooks 主要趋势反转" in readme
     assert "已落地 5 个扩展方案" in readme
+
+
+def test_al_brooks_mapping_doc_records_sources_and_chinese_names() -> None:
+    doc = (ROOT / "docs" / "al_brooks_entry_mapping.md").read_text(encoding="utf-8")
+
+    assert "Brooks 趋势回撤 H2/L2" in doc
+    assert "Brooks 交易区间失败突破" in doc
+    assert "Brooks 主要趋势反转" in doc
+    assert "brookstradingcourse.com/brooks-price-action-abbreviations" in doc
 
 
 def test_requirements_match_delivered_handoff_runtime_floor() -> None:

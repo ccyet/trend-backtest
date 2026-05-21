@@ -818,7 +818,7 @@ def test_candle_run_acceleration_requires_non_decreasing_body_strength() -> None
     assert not bool(decelerating.loc[2, "is_signal"])
 
 
-def test_brooks_trend_pullback_long_requires_trend_and_two_countertrend_bars() -> None:
+def test_brooks_trend_pullback_long_rejects_plain_two_bear_bar_pullback_without_h2() -> None:
     df = make_df(
         [
             (100.0, 101.0, 99.0, 100.0, 1000),
@@ -842,8 +842,37 @@ def test_brooks_trend_pullback_long_requires_trend_and_two_countertrend_bars() -
         ),
     )
 
-    assert float(result.loc[6, "entry_trigger_price"]) == 103.5
-    assert bool(result.loc[6, "is_signal"])
+    assert not bool(result.loc[6, "is_signal"])
+
+
+def test_brooks_trend_pullback_long_requires_h2_signal_bar() -> None:
+    df = make_df(
+        [
+            (100.0, 101.0, 99.0, 100.0, 1000),
+            (101.0, 103.0, 100.5, 102.0, 1000),
+            (102.0, 105.0, 101.5, 104.0, 1000),
+            (104.0, 106.0, 103.0, 105.0, 1000),
+            (104.0, 104.2, 102.5, 103.0, 1000),
+            (103.0, 104.5, 102.8, 104.0, 1000),
+            (104.0, 104.2, 102.5, 103.0, 1000),
+            (103.0, 104.8, 102.8, 104.6, 1000),
+            (104.7, 105.2, 104.5, 105.0, 1000),
+        ]
+    )
+
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="brooks_trend_pullback",
+            brooks_pullback_ma_period=3,
+            brooks_pullback_lookback=5,
+            brooks_pullback_min_countertrend_bars=2,
+            brooks_pullback_max_depth_pct=6.0,
+        ),
+    )
+
+    assert float(result.loc[8, "entry_trigger_price"]) == 104.8
+    assert bool(result.loc[8, "is_signal"])
 
 
 def test_brooks_trading_range_reversal_long_uses_failed_downside_breakout() -> None:
@@ -852,8 +881,8 @@ def test_brooks_trading_range_reversal_long_uses_failed_downside_breakout() -> N
             (100.0, 102.0, 98.0, 100.0, 1000),
             (100.0, 103.0, 99.0, 101.0, 1000),
             (101.0, 102.0, 98.5, 100.5, 1000),
-            (100.5, 101.5, 97.5, 99.5, 1000),
-            (99.6, 102.0, 99.0, 100.8, 1000),
+            (98.2, 101.5, 97.5, 100.8, 1000),
+            (100.9, 102.0, 100.0, 101.2, 1000),
         ]
     )
 
@@ -869,6 +898,30 @@ def test_brooks_trading_range_reversal_long_uses_failed_downside_breakout() -> N
 
     assert float(result.loc[4, "entry_trigger_price"]) == 101.5
     assert bool(result.loc[4, "is_signal"])
+
+
+def test_brooks_trading_range_reversal_rejects_weak_failed_breakout_signal_bar() -> None:
+    df = make_df(
+        [
+            (100.0, 102.0, 98.0, 100.0, 1000),
+            (100.0, 103.0, 99.0, 101.0, 1000),
+            (101.0, 102.0, 98.5, 100.5, 1000),
+            (100.5, 101.5, 97.5, 98.4, 1000),
+            (98.6, 101.6, 98.4, 100.8, 1000),
+        ]
+    )
+
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="brooks_trading_range_reversal",
+            brooks_range_lookback=3,
+            brooks_range_break_buffer_pct=0.2,
+            brooks_range_min_width_pct=2.0,
+        ),
+    )
+
+    assert not bool(result.loc[4, "is_signal"])
 
 
 def test_brooks_major_trend_reversal_long_uses_retest_after_bear_trend() -> None:
@@ -897,6 +950,58 @@ def test_brooks_major_trend_reversal_long_uses_retest_after_bear_trend() -> None
 
     assert float(result.loc[7, "entry_trigger_price"]) == 102.0
     assert bool(result.loc[7, "is_signal"])
+
+
+def test_brooks_major_trend_reversal_rejects_retest_without_prior_channel_break() -> None:
+    df = make_df(
+        [
+            (110.0, 111.0, 108.0, 109.0, 1000),
+            (108.5, 109.0, 105.0, 106.0, 1000),
+            (106.0, 106.5, 102.0, 103.0, 1000),
+            (103.0, 104.0, 99.5, 100.0, 1000),
+            (100.0, 102.0, 99.7, 101.6, 1000),
+            (101.8, 102.5, 101.5, 102.2, 1000),
+        ]
+    )
+
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="brooks_major_trend_reversal",
+            brooks_mtr_lookback=4,
+            brooks_mtr_ma_period=3,
+            brooks_mtr_retest_buffer_pct=0.5,
+        ),
+    )
+
+    assert not bool(result.loc[5, "is_signal"])
+
+
+def test_brooks_major_trend_reversal_rejects_weak_retest_signal_bar() -> None:
+    df = make_df(
+        [
+            (110.0, 111.0, 108.0, 109.0, 1000),
+            (108.5, 109.0, 105.0, 106.0, 1000),
+            (106.0, 106.5, 102.0, 103.0, 1000),
+            (103.0, 104.0, 99.5, 100.0, 1000),
+            (100.0, 102.0, 99.8, 101.5, 1000),
+            (101.5, 103.0, 100.5, 102.5, 1000),
+            (99.0, 102.0, 98.8, 99.2, 1000),
+            (101.4, 102.2, 101.0, 102.0, 1000),
+        ]
+    )
+
+    result = apply_gap_filters(
+        df,
+        make_params(
+            entry_factor="brooks_major_trend_reversal",
+            brooks_mtr_lookback=4,
+            brooks_mtr_ma_period=3,
+            brooks_mtr_retest_buffer_pct=0.5,
+        ),
+    )
+
+    assert not bool(result.loc[7, "is_signal"])
 
 
 def test_eshb_setup_detects_valid_30m_pattern_and_populates_diagnostics() -> None:

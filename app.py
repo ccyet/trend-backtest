@@ -312,9 +312,9 @@ ENTRY_FACTOR_LABELS = {
     "candle_run": "连续K线追势",
     "candle_run_acceleration": "连续K线加速追势",
     "early_surge_high_base": "早盘冲高高位横盘突破",
-    "brooks_trend_pullback": "Brooks趋势两段回撤",
-    "brooks_trading_range_reversal": "Brooks交易区间失败突破",
-    "brooks_major_trend_reversal": "Brooks主要趋势反转",
+    "brooks_trend_pullback": "Brooks 趋势回撤 H2/L2",
+    "brooks_trading_range_reversal": "Brooks 交易区间失败突破",
+    "brooks_major_trend_reversal": "Brooks 主要趋势反转",
 }
 FACTOR_SPECIFIC_WIDGET_KEYS = {
     "gap": ("gap_entry_mode", "gap_pct", "max_gap_filter_pct"),
@@ -505,7 +505,7 @@ ENTRY_DIRECTION_OPTIONS = {
         ("连续阴线加速追空", "down"),
     ),
     "early_surge_high_base": (("早盘冲高高位横盘突破", "up"),),
-    "brooks_trend_pullback": (("牛趋势H2回撤买入", "up"), ("熊趋势L2回撤卖出", "down")),
+    "brooks_trend_pullback": (("牛趋势 H2 回撤买入", "up"), ("熊趋势 L2 回撤卖出", "down")),
     "brooks_trading_range_reversal": (("区间下沿失败跌破买入", "up"), ("区间上沿失败突破卖出", "down")),
     "brooks_major_trend_reversal": (("熊转牛主要反转", "up"), ("牛转熊主要反转", "down")),
 }
