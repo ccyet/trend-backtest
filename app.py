@@ -37,6 +37,10 @@ from data.services.indicator_catalog_service import (
     summarize_indicator_quality,
 )
 from data.services.local_inventory_service import load_inventory
+from data.services.kline_archive_service import (
+    migrate_kline_archive,
+    plan_kline_archive_migration,
+)
 from exporter import export_to_excel_bytes
 from models import (
     AnalysisParams,
@@ -2695,6 +2699,14 @@ if page_mode == "数据准备页":
             default=["1d"],
             key="offline_update_timeframe",
         )
+        offline_update_workers = st.number_input(
+            "并发下载数",
+            min_value=1,
+            max_value=16,
+            value=1,
+            step=1,
+            key="offline_update_workers",
+        )
         refresh_symbol_meta = st.checkbox(
             "刷新股票列表", value=False, key="offline_update_refresh"
         )
@@ -2740,6 +2752,7 @@ if page_mode == "数据准备页":
             export_excel=bool(export_excel_after_update),
             provider_overrides=update_provider_overrides,
             tdx_tqcenter_path=str(st.session_state.get("tdx_tqcenter_path", "")),
+            workers=int(offline_update_workers),
         )
         if ok:
             st.success("本地数据更新完成")
@@ -2891,6 +2904,77 @@ if page_mode == "数据准备页":
         st.markdown("**库内已有数据**")
         st.caption("按周期汇总展示已有标的数、总行数和最近更新时间。")
         dataframe_stretch(inventory_summary_df, hide_index=True, height=180)
+    st.markdown("**K线存档资料管理**")
+    st.caption("支持预览后复制或移动 parquet / csv / Excel K 线资料，目录结构会保留。")
+    archive_path_cols = st.columns(2)
+    archive_source_path = archive_path_cols[0].text_input(
+        "源路径",
+        value="data/market",
+        key="kline_archive_source_path",
+    )
+    archive_destination_path = archive_path_cols[1].text_input(
+        "目标目录",
+        value="data/market_archive",
+        key="kline_archive_destination_path",
+    )
+    archive_option_cols = st.columns([1, 1, 2])
+    archive_operation_label = archive_option_cols[0].selectbox(
+        "操作",
+        options=["复制", "移动"],
+        key="kline_archive_operation",
+    )
+    archive_overwrite = archive_option_cols[1].checkbox(
+        "覆盖同名文件",
+        value=False,
+        key="kline_archive_overwrite",
+    )
+    archive_operation = "move" if archive_operation_label == "移动" else "copy"
+    archive_action_cols = st.columns([1, 1, 2])
+    if archive_action_cols[0].button("预览迁移", key="kline_archive_preview"):
+        try:
+            archive_plan = plan_kline_archive_migration(
+                source_path=archive_source_path,
+                destination_path=archive_destination_path,
+                operation=archive_operation,
+                overwrite=bool(archive_overwrite),
+            )
+            st.session_state["kline_archive_plan"] = archive_plan
+            if archive_plan.empty:
+                st.info("未发现可迁移的 K 线资料。")
+            else:
+                st.success(f"已找到 {len(archive_plan)} 个可处理文件。")
+        except Exception as exc:  # noqa: BLE001
+            st.session_state["kline_archive_plan"] = pd.DataFrame()
+            st.error(f"K线资料预览失败：{exc}")
+
+    if archive_action_cols[1].button("执行迁移", key="kline_archive_execute"):
+        try:
+            archive_result = migrate_kline_archive(
+                source_path=archive_source_path,
+                destination_path=archive_destination_path,
+                operation=archive_operation,
+                overwrite=bool(archive_overwrite),
+            )
+            st.session_state["kline_archive_result"] = archive_result
+            if archive_result.empty:
+                st.info("未发现可迁移的 K 线资料。")
+            else:
+                st.success(f"K线资料迁移完成，处理 {len(archive_result)} 个文件。")
+        except Exception as exc:  # noqa: BLE001
+            st.session_state["kline_archive_result"] = pd.DataFrame()
+            st.error(f"K线资料迁移失败：{exc}")
+
+    archive_plan_display = st.session_state.get("kline_archive_plan")
+    if isinstance(archive_plan_display, pd.DataFrame) and not archive_plan_display.empty:
+        st.markdown("**迁移预览**")
+        dataframe_stretch(archive_plan_display, hide_index=True, height=220)
+    archive_result_display = st.session_state.get("kline_archive_result")
+    if (
+        isinstance(archive_result_display, pd.DataFrame)
+        and not archive_result_display.empty
+    ):
+        st.markdown("**迁移结果**")
+        dataframe_stretch(archive_result_display, hide_index=True, height=220)
     preview = load_update_log_preview(limit=20)
     log_action_cols = st.columns([1, 3])
     if log_action_cols[0].button("清空更新日志", key="clear_update_log"):

@@ -98,6 +98,10 @@ def _clean_bars(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 
 def _merge_incremental(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
+    if new_df.empty:
+        return old_df.sort_values("date").reset_index(drop=True)
+    if old_df.empty:
+        return new_df.sort_values("date").reset_index(drop=True)
     merged = pd.concat([old_df, new_df], ignore_index=True)
     merged = merged.drop_duplicates(subset=["date"], keep="last")
     merged = merged.sort_values("date").reset_index(drop=True)
@@ -151,6 +155,65 @@ def _resolve_incremental_start(
     return effective_start.strftime(
         "%Y-%m-%d %H:%M:%S" if timeframe != "1d" else "%Y-%m-%d"
     )
+
+
+def _format_window_date(value: pd.Timestamp, timeframe: str) -> str:
+    return value.strftime("%Y-%m-%d %H:%M:%S" if timeframe != "1d" else "%Y-%m-%d")
+
+
+def _resolve_incremental_windows(
+    requested_start: str,
+    requested_end: str,
+    existing_df: pd.DataFrame | None,
+    timeframe: str,
+) -> list[tuple[str, str]]:
+    requested_start_ts = pd.to_datetime(requested_start)
+    requested_end_ts = pd.to_datetime(requested_end)
+    if existing_df is None or existing_df.empty or "date" not in existing_df.columns:
+        return [
+            (
+                _format_window_date(requested_start_ts, timeframe),
+                _format_window_date(requested_end_ts, timeframe),
+            )
+        ]
+
+    existing_dates = pd.to_datetime(existing_df["date"], errors="coerce").dropna()
+    if existing_dates.empty:
+        return [
+            (
+                _format_window_date(requested_start_ts, timeframe),
+                _format_window_date(requested_end_ts, timeframe),
+            )
+        ]
+
+    min_existing = cast(pd.Timestamp, existing_dates.min())
+    max_existing = cast(pd.Timestamp, existing_dates.max())
+    windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    if requested_start_ts < min_existing:
+        windows.append((requested_start_ts, min(requested_end_ts, min_existing)))
+
+    if requested_end_ts > max_existing:
+        backfill_days = TIMEFRAME_BACKFILL_DAYS.get(timeframe, 5)
+        tail_start = max(
+            requested_start_ts,
+            min_existing,
+            max_existing - pd.Timedelta(days=backfill_days),
+        )
+        windows.append((tail_start, requested_end_ts))
+
+    if (
+        not windows
+        and requested_start_ts >= min_existing
+        and requested_end_ts <= max_existing
+    ):
+        return []
+
+    return [
+        (_format_window_date(start, timeframe), _format_window_date(end, timeframe))
+        for start, end in windows
+        if start <= end
+    ]
 
 
 def _build_inventory_row(
@@ -280,21 +343,42 @@ def update_one_symbol(
 
     try:
         existing: pd.DataFrame | None = None
-        fetch_start = start_date
         if symbol_path.exists():
             existing = pd.read_parquet(symbol_path)
             existing["date"] = pd.to_datetime(existing["date"], errors="coerce")
-            fetch_start = _resolve_incremental_start(start_date, existing, timeframe)
-
-        raw = _fetch_bars_for_timeframe(
-            symbol=standardized_symbol,
-            timeframe=timeframe,
-            start_date=fetch_start,
-            end_date=end_date,
-            adjust=adjust,
-            provider=provider,
+        fetch_windows = _resolve_incremental_windows(
+            start_date, end_date, existing, timeframe
         )
-        cleaned = _clean_bars(raw, standardized_symbol)
+
+        cleaned_frames: list[pd.DataFrame] = []
+        for fetch_start, fetch_end in fetch_windows:
+            raw = _fetch_bars_for_timeframe(
+                symbol=standardized_symbol,
+                timeframe=timeframe,
+                start_date=fetch_start,
+                end_date=fetch_end,
+                adjust=adjust,
+                provider=provider,
+            )
+            cleaned_frames.append(_clean_bars(raw, standardized_symbol))
+        cleaned = (
+            pd.concat(cleaned_frames, ignore_index=True)
+            if cleaned_frames
+            else pd.DataFrame(
+                columns=pd.Index(
+                    [
+                        "date",
+                        "symbol",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                        "amount",
+                    ]
+                )
+            )
+        )
 
         if existing is not None:
             merged = _merge_incremental(existing, cleaned)

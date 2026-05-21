@@ -31,9 +31,14 @@
 ## 1. 目前支持的核心能力
 
 - **离线行情更新**（支持按周期选择 AKShare / TDX 数据源）
+  - 增量更新会识别本地已覆盖区间；请求区间已完整覆盖时不会再发起网络拉取
+  - 请求区间只缺前段或后段时，仅补齐缺口窗口，后段保留少量回填用于修正最近数据
 - **通达信量化（TdxQuant）能力接入**
   - 支持通过本机通达信量化终端获取历史 **日线 / 1m / 5m** K 线数据
   - 支持调用通达信公式并将结果落地为本地 parquet 指标文件
+- **K 线存档资料管理**
+  - 数据准备页支持预览后复制或移动 `parquet / csv / xlsx / xls` 文件
+  - 迁移时保留目录结构，并阻止把目标目录放在源目录内部
 - **多数据源回测输入**：本地 Parquet / SQLite / 上传 Excel/CSV
 - **单账户单持仓回测框架**（研究型 long/short 镜像）
 - **九类入场因子**
@@ -269,8 +274,9 @@ data/services/local_data_service.py
 
 1. UI 或 CLI 调用 `scripts/update_data.py`
 2. 按周期解析更新源（`AKShare` / `TDX`）
-3. 对应 provider 拉取历史 K 线并清洗标准化后落地 parquet
-4. 更新日志到 `data/market/metadata/update_log.parquet`
+3. 读取本地已有 parquet，解析缺口窗口；已完整覆盖的请求不重复拉取
+4. 对应 provider 拉取缺口历史 K 线并清洗标准化后落地 parquet
+5. 更新日志到 `data/market/metadata/update_log.parquet`
 
 补充说明：
 
@@ -279,6 +285,8 @@ data/services/local_data_service.py
 - 当前默认配置为：`1d/30m/15m -> AKShare`，`5m/1m -> TDX`
 - 当前更新链路已支持 `1d / 30m / 15m / 5m / 1m` 按周期切换 `AKShare / TDX` 数据源；默认值仍保持现有较稳妥配置
 - 标准化结果统一保留 `volume` / `amount` 字段
+- `--workers` 可并发单标的下载与落盘；共享 update log / inventory 仍串行写入
+- 数据准备页提供 K 线存档资料管理，先预览迁移计划，再执行复制或移动
 
 ### 5.1.1 通达信量化（TdxQuant）补充说明
 

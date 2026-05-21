@@ -291,6 +291,7 @@ def run_local_data_update(
     export_excel: bool,
     provider_overrides: dict[str, str] | None = None,
     tdx_tqcenter_path: str = "",
+    workers: int = 1,
 ) -> tuple[bool, str]:
     cmd = [
         sys.executable,
@@ -330,6 +331,8 @@ def run_local_data_update(
         cmd.append("--refresh-symbols")
     if export_excel:
         cmd.append("--export-excel")
+    if workers > 1:
+        cmd.extend(["--workers", str(int(workers))])
 
     result = subprocess.run(
         cmd,

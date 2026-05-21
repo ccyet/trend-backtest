@@ -579,6 +579,93 @@ def test_resolve_incremental_start_respects_requested_start_for_1m():
     assert result == "2024-01-04 00:00:00"
 
 
+def test_resolve_incremental_windows_skips_fully_covered_range() -> None:
+    existing = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-10"],
+            "symbol": ["000001.SZ", "000001.SZ"],
+        }
+    )
+
+    windows = upd._resolve_incremental_windows(
+        "2024-01-02", "2024-01-09", existing, "1d"
+    )
+
+    assert windows == []
+
+
+def test_resolve_incremental_windows_splits_head_and_tail_gaps() -> None:
+    existing = pd.DataFrame(
+        {
+            "date": ["2024-01-10", "2024-01-20"],
+            "symbol": ["000001.SZ", "000001.SZ"],
+        }
+    )
+
+    windows = upd._resolve_incremental_windows(
+        "2024-01-01", "2024-01-25", existing, "1d"
+    )
+
+    assert windows == [
+        ("2024-01-01", "2024-01-10"),
+        ("2024-01-10", "2024-01-25"),
+    ]
+
+
+def test_update_one_symbol_skips_network_when_requested_range_is_covered(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import pytest
+
+    pytest.importorskip("pyarrow")
+    monkeypatch.setattr(upd, "ROOT", tmp_path)
+    monkeypatch.setattr(upd, "METADATA_DIR", tmp_path / "data" / "market" / "metadata")
+    monkeypatch.setattr(
+        upd,
+        "UPDATE_LOG_PATH",
+        tmp_path / "data" / "market" / "metadata" / "update_log.parquet",
+    )
+    monkeypatch.setattr(upd, "upsert_inventory_row", lambda row: row)
+    monkeypatch.setattr(
+        upd.AkshareProvider, "to_standard_symbol", staticmethod(lambda x: "000001.SZ")
+    )
+    monkeypatch.setattr(
+        upd,
+        "_fetch_bars_for_timeframe",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("covered range should not fetch")
+        ),
+    )
+
+    local_root = tmp_path / "data" / "market" / "daily"
+    parquet_path = local_root / "qfq" / "000001.SZ.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-10"],
+            "symbol": ["000001.SZ", "000001.SZ"],
+            "open": [1.0, 2.0],
+            "high": [1.1, 2.1],
+            "low": [0.9, 1.9],
+            "close": [1.0, 2.0],
+            "volume": [10.0, 20.0],
+            "amount": [100.0, 200.0],
+        }
+    ).to_parquet(parquet_path, index=False)
+
+    ok = upd.update_one_symbol(
+        "000001.SZ",
+        "2024-01-02",
+        "2024-01-09",
+        "qfq",
+        local_root,
+        export_excel=False,
+        timeframe="1d",
+    )
+
+    assert ok
+
+
 def test_update_one_symbol_preserves_root_cause_in_error_message(
     tmp_path: Path, monkeypatch
 ):

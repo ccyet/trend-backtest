@@ -213,23 +213,26 @@ def test_render_trade_explanations_keeps_trace_sections_without_trades() -> None
     )
 
 
-def test_filter_signal_trace_tolerates_missing_optional_columns() -> None:
-    def _render() -> None:
-        import pandas as local_pd
+def test_filter_signal_trace_tolerates_missing_optional_columns(monkeypatch) -> None:
+    class _FakeColumn:
+        @staticmethod
+        def selectbox(label, options, key):
+            del label, key
+            return options[0]
 
-        signal_trace_df = local_pd.DataFrame(
-            [
-                {
-                    "date": "2024-01-02",
-                    "entry_factor": "trend_breakout",
-                }
-            ]
-        )
-        from ui.components import results_view as local_results_view
+    monkeypatch.setattr(
+        results_view.st, "columns", lambda count: [_FakeColumn()] * count
+    )
+    signal_trace_df = pd.DataFrame(
+        [
+            {
+                "date": "2024-01-02",
+                "entry_factor": "trend_breakout",
+            }
+        ]
+    )
 
-        local_results_view.filter_signal_trace(signal_trace_df)
+    filtered_df = results_view.filter_signal_trace(signal_trace_df)
 
-    at = AppTest.from_function(_render, default_timeout=10)
-    at.run()
-
-    assert len(at.exception) == 0
+    assert len(filtered_df) == 1
+    assert "trigger_pass" in filtered_df.columns

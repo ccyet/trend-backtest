@@ -522,6 +522,47 @@ def test_app_passes_tdx_tqcenter_path_to_update_subprocess(
     assert provider_values == ["1d=tdx", "30m=akshare"]
 
 
+def test_app_exposes_kline_archive_manager_controls() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+    app.radio(key="page_mode").set_value("数据准备页")
+    app.run()
+
+    assert app.text_input(key="kline_archive_source_path").label == "源路径"
+    assert app.text_input(key="kline_archive_destination_path").label == "目标目录"
+    assert app.selectbox(key="kline_archive_operation").options == ["复制", "移动"]
+    assert app.button(key="kline_archive_preview").label == "预览迁移"
+    assert app.button(key="kline_archive_execute").label == "执行迁移"
+
+
+def test_app_passes_workers_to_update_subprocess(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeResult:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(cmd, capture_output, text, env=None):
+        del capture_output, text, env
+        captured["cmd"] = cmd
+        return _FakeResult()
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+    app.radio(key="page_mode").set_value("数据准备页")
+    app.run()
+    app.number_input(key="offline_update_workers").set_value(4)
+    app.button(key="offline_update_submit").click()
+    app.run()
+
+    cmd = cast(list[str], captured["cmd"])
+    assert "--workers" in cmd
+    assert cmd[cmd.index("--workers") + 1] == "4"
+
+
 def test_app_passes_tdx_tqcenter_path_to_indicator_import_subprocess(
     monkeypatch, tmp_path: Path
 ) -> None:
