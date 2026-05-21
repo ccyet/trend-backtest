@@ -25,6 +25,10 @@ def test_al_brooks_mapping_doc_records_sources_and_chinese_names() -> None:
     assert "Brooks 交易区间失败突破" in doc
     assert "Brooks 主要趋势反转" in doc
     assert "brookstradingcourse.com/brooks-price-action-abbreviations" in doc
+    assert "close_pos_t = (close_t - low_t) / (high_t - low_t)" in doc
+    assert "attempt_count_t = sum(long_attempt_i, i=t-L..t-1)" in doc
+    assert "range_width_pct_t = (range_high_t / range_low_t - 1) * 100" in doc
+    assert "trendline_break_t = any(close_i > ma_i, i=t-L-1..t-2)" in doc
 
 
 def test_requirements_match_delivered_handoff_runtime_floor() -> None:
