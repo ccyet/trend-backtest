@@ -60,14 +60,14 @@ def make_params(**overrides: Any) -> AnalysisParams:
 
 def make_stock_df(rows):
     data = []
-    for i, (o, h, l, c) in enumerate(rows):
+    for i, (o, h, low, c) in enumerate(rows):
         data.append(
             {
                 "date": pd.Timestamp("2024-01-01") + pd.Timedelta(days=i),
                 "stock_code": "000001.SZ",
                 "open": o,
                 "high": h,
-                "low": l,
+                "low": low,
                 "close": c,
                 "volume": 1000,
                 "prev_close": 99.0,

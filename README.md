@@ -9,13 +9,16 @@
 
 - 支持 **本地 Parquet / SQLite / Excel/CSV** 作为回测输入
 - 支持 **TDX 量化能力接入**：历史 K 线更新、通达信公式导入本地指标 parquet
-- 当前共有 6 类入场因子：
+- 当前共有 9 类入场因子：
   - `gap`
   - `trend_breakout`
   - `volatility_contraction_breakout`
   - `candle_run`
   - `candle_run_acceleration`
   - `early_surge_high_base`
+  - `brooks_trend_pullback`
+  - `brooks_trading_range_reversal`
+  - `brooks_major_trend_reversal`
 - 导入指标当前可用于：
   - 开仓过滤
   - 整笔离场
@@ -28,18 +31,26 @@
 ## 1. 目前支持的核心能力
 
 - **离线行情更新**（支持按周期选择 AKShare / TDX 数据源）
+  - 增量更新会识别本地已覆盖区间；请求区间已完整覆盖时不会再发起网络拉取
+  - 请求区间只缺前段或后段时，仅补齐缺口窗口，后段保留少量回填用于修正最近数据
 - **通达信量化（TdxQuant）能力接入**
   - 支持通过本机通达信量化终端获取历史 **日线 / 1m / 5m** K 线数据
   - 支持调用通达信公式并将结果落地为本地 parquet 指标文件
+- **K 线存档资料管理**
+  - 数据准备页支持预览后复制或移动 `parquet / csv / xlsx / xls` 文件
+  - 迁移时保留目录结构，并阻止把目标目录放在源目录内部
 - **多数据源回测输入**：本地 Parquet / SQLite / 上传 Excel/CSV
 - **单账户单持仓回测框架**（研究型 long/short 镜像）
-- **六类入场因子**
+- **九类入场因子**
   - `gap`（跳空）
   - `trend_breakout`（趋势突破）
   - `volatility_contraction_breakout`（波动收缩突破）
   - `candle_run`（连续K线追势）
   - `candle_run_acceleration`（连续K线加速追势）
   - `early_surge_high_base`（早盘冲高高位横盘突破）
+  - `brooks_trend_pullback`（Brooks 趋势两段回撤）
+  - `brooks_trading_range_reversal`（Brooks 交易区间失败突破）
+  - `brooks_major_trend_reversal`（Brooks 主要趋势反转）
 - **退出风控体系**
   - 全仓止损
   - 分批退出（2~3 批，按优先级）
@@ -54,7 +65,7 @@
 
 ## 1.1 本次新增方案的落地选择
 
-围绕“连续阳线追涨 / 连续阴线追空”这条扩展线，本次最终**落地 2 个方案**：
+围绕“连续阳线追涨 / 连续阴线追空”和 Al Brooks 价格行为框架，本仓库已落地 5 个扩展方案：
 
 1. `candle_run`
    - 面向连续同向 K 线组合的基础追势方案
@@ -62,8 +73,17 @@
 2. `candle_run_acceleration`
    - 在 `candle_run` 基础上增加“实体强度不递减”的加速约束
    - 适合研究更强势的连续推进场景
+3. `brooks_trend_pullback`
+   - 对应 Brooks 的趋势中 H2 / L2 回撤再入场思想
+   - 先确认趋势背景，再要求回撤窗口内出现足够逆势 K 线，并在信号棒突破时进场
+4. `brooks_trading_range_reversal`
+   - 对应 Brooks 的交易区间上沿/下沿失败突破
+   - 先用区间宽度确认可交易区间，再交易极端假突破回到区间后的反向触发
+5. `brooks_major_trend_reversal`
+   - 对应 Brooks 的主要趋势反转
+   - 旧趋势先衰竭并被均线结构打破，再回测旧极端失败后才触发
 
-这两个方案都已完成参数接线、UI 暴露、信号生成、策略统计与测试覆盖；`30m / 15m` 当前仍作为周期插座保留，未宣称已完成完整多周期回测。
+这些方案都已完成参数接线、UI 暴露、信号生成、策略统计与测试覆盖；`30m / 15m` 当前仍作为周期插座保留，未宣称已完成完整多周期回测。
 
 ### 1.1.1 指标怎么用
 
@@ -254,8 +274,9 @@ data/services/local_data_service.py
 
 1. UI 或 CLI 调用 `scripts/update_data.py`
 2. 按周期解析更新源（`AKShare` / `TDX`）
-3. 对应 provider 拉取历史 K 线并清洗标准化后落地 parquet
-4. 更新日志到 `data/market/metadata/update_log.parquet`
+3. 读取本地已有 parquet，解析缺口窗口；已完整覆盖的请求不重复拉取
+4. 对应 provider 拉取缺口历史 K 线并清洗标准化后落地 parquet
+5. 更新日志到 `data/market/metadata/update_log.parquet`
 
 补充说明：
 
@@ -264,6 +285,8 @@ data/services/local_data_service.py
 - 当前默认配置为：`1d/30m/15m -> AKShare`，`5m/1m -> TDX`
 - 当前更新链路已支持 `1d / 30m / 15m / 5m / 1m` 按周期切换 `AKShare / TDX` 数据源；默认值仍保持现有较稳妥配置
 - 标准化结果统一保留 `volume` / `amount` 字段
+- `--workers` 可并发单标的下载与落盘；共享 update log / inventory 仍串行写入
+- 数据准备页提供 K 线存档资料管理，先预览迁移计划，再执行复制或移动
 
 ### 5.1.1 通达信量化（TdxQuant）补充说明
 
@@ -336,6 +359,14 @@ python scripts/update_data.py --symbols 000001.SZ --start-date 2024-01-01 --end-
 ```
 
 `30m / 15m` 也可使用同样的 `--provider timeframe=source` 方式切换更新源。
+
+全市场或大股票池更新时可以增加并发下载：
+
+```bash
+python scripts/update_data.py --start-date 2024-01-01 --end-date 2024-12-31 --adjust qfq --timeframe 1d --workers 4
+```
+
+`--workers` 只并发单标的拉取与 parquet 写入，共享的 update log / inventory 元数据仍串行写入，避免并发覆盖。
 
 如需调用通达信公式并导入本地指标，可使用：
 

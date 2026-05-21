@@ -24,7 +24,6 @@ from data_loader import (
     list_candidate_tables,
     list_file_sheets,
     load_market_data,
-    normalize_tdx_tqcenter_path,
     probe_local_indicator_candidates,
     quote_ident,
     read_data_source_config,
@@ -38,6 +37,10 @@ from data.services.indicator_catalog_service import (
     summarize_indicator_quality,
 )
 from data.services.local_inventory_service import load_inventory
+from data.services.kline_archive_service import (
+    migrate_kline_archive,
+    plan_kline_archive_migration,
+)
 from exporter import export_to_excel_bytes
 from models import (
     AnalysisParams,
@@ -57,6 +60,7 @@ from models import (
 )
 from pages.backtest import render_backtest_page_header, render_backtest_sidebar_intro
 from pages.data_prep import render_data_prep_page_header, render_data_prep_sidebar_intro
+from pages.similarity_research import render_similarity_research_page
 from ui.components.advanced_panels import (
     ADVANCED_SECTION_CAPTION,
     ADVANCED_SECTION_TITLE,
@@ -165,6 +169,16 @@ SCAN_FIELD_LABELS = {
     "candle_run_length": "连续K线根数",
     "candle_run_min_body_pct": "单根最小实体幅度",
     "candle_run_total_move_pct": "组合最小累计涨跌幅",
+    "brooks_pullback_ma_period": "Brooks回撤均线周期",
+    "brooks_pullback_lookback": "Brooks回撤观察K数",
+    "brooks_pullback_min_countertrend_bars": "Brooks最少逆势K数",
+    "brooks_pullback_max_depth_pct": "Brooks最大回撤深度",
+    "brooks_range_lookback": "Brooks区间回看K数",
+    "brooks_range_break_buffer_pct": "Brooks假突破缓冲",
+    "brooks_range_min_width_pct": "Brooks最小区间宽度",
+    "brooks_mtr_lookback": "Brooks反转回看K数",
+    "brooks_mtr_ma_period": "Brooks反转均线周期",
+    "brooks_mtr_retest_buffer_pct": "Brooks极端点回测缓冲",
     "eshb_open_window_bars": "早盘观察窗口K数",
     "eshb_base_min_bars": "高位横盘最少K数",
     "eshb_base_max_bars": "高位横盘最多K数",
@@ -298,6 +312,9 @@ ENTRY_FACTOR_LABELS = {
     "candle_run": "连续K线追势",
     "candle_run_acceleration": "连续K线加速追势",
     "early_surge_high_base": "早盘冲高高位横盘突破",
+    "brooks_trend_pullback": "Brooks趋势两段回撤",
+    "brooks_trading_range_reversal": "Brooks交易区间失败突破",
+    "brooks_major_trend_reversal": "Brooks主要趋势反转",
 }
 FACTOR_SPECIFIC_WIDGET_KEYS = {
     "gap": ("gap_entry_mode", "gap_pct", "max_gap_filter_pct"),
@@ -329,6 +346,22 @@ FACTOR_SPECIFIC_WIDGET_KEYS = {
         "eshb_min_breakout_volume_ratio",
         "eshb_trigger_buffer_pct",
     ),
+    "brooks_trend_pullback": (
+        "brooks_pullback_ma_period",
+        "brooks_pullback_lookback",
+        "brooks_pullback_min_countertrend_bars",
+        "brooks_pullback_max_depth_pct",
+    ),
+    "brooks_trading_range_reversal": (
+        "brooks_range_lookback",
+        "brooks_range_break_buffer_pct",
+        "brooks_range_min_width_pct",
+    ),
+    "brooks_major_trend_reversal": (
+        "brooks_mtr_lookback",
+        "brooks_mtr_ma_period",
+        "brooks_mtr_retest_buffer_pct",
+    ),
 }
 FACTOR_CONTROL_DEFAULTS: dict[str, str | int | float] = {
     "gap_entry_mode": "strict_break",
@@ -351,6 +384,16 @@ FACTOR_CONTROL_DEFAULTS: dict[str, str | int | float] = {
     "eshb_min_open_volume_ratio": 1.2,
     "eshb_min_breakout_volume_ratio": 1.0,
     "eshb_trigger_buffer_pct": 0.05,
+    "brooks_pullback_ma_period": 20,
+    "brooks_pullback_lookback": 5,
+    "brooks_pullback_min_countertrend_bars": 2,
+    "brooks_pullback_max_depth_pct": 8.0,
+    "brooks_range_lookback": 20,
+    "brooks_range_break_buffer_pct": 0.2,
+    "brooks_range_min_width_pct": 4.0,
+    "brooks_mtr_lookback": 20,
+    "brooks_mtr_ma_period": 20,
+    "brooks_mtr_retest_buffer_pct": 1.0,
     "atr_filter_period": 14,
     "min_atr_filter_pct": 0.0,
     "max_atr_filter_pct": 100.0,
@@ -462,6 +505,9 @@ ENTRY_DIRECTION_OPTIONS = {
         ("连续阴线加速追空", "down"),
     ),
     "early_surge_high_base": (("早盘冲高高位横盘突破", "up"),),
+    "brooks_trend_pullback": (("牛趋势H2回撤买入", "up"), ("熊趋势L2回撤卖出", "down")),
+    "brooks_trading_range_reversal": (("区间下沿失败跌破买入", "up"), ("区间上沿失败突破卖出", "down")),
+    "brooks_major_trend_reversal": (("熊转牛主要反转", "up"), ("牛转熊主要反转", "down")),
 }
 LOCAL_INVENTORY_COLUMN_LABELS = {
     "symbol": "股票",
@@ -1552,7 +1598,6 @@ def format_anomaly_queue_for_display(
             display_df[column] = display_df[column].map(format_percent)
     for column in ANOMALY_NUMBER_COLUMNS:
         if column in display_df.columns:
-            digits = 2 if column == "severity_score" else 0
             formatter = (
                 (lambda value: format_number(value, digits=2))
                 if column == "severity_score"
@@ -2530,6 +2575,7 @@ apply_pending_page_change()
 
 st.sidebar.markdown("**页面导航**")
 page_mode_options = ["回测工作台", "数据准备页", "交易配置说明"]
+page_mode_options.insert(2, "相似阶段研究")
 page_mode_default = str(st.session_state.get("page_mode", "回测工作台"))
 if page_mode_default not in page_mode_options:
     page_mode_default = "回测工作台"
@@ -2544,6 +2590,10 @@ st.sidebar.caption("回测与数据准备分开，减少单页堆叠。")
 
 if page_mode == "交易配置说明":
     render_trading_guide_page()
+    st.stop()
+
+if page_mode == "相似阶段研究":
+    render_similarity_research_page()
     st.stop()
 
 if page_mode == "数据准备页":
@@ -2649,6 +2699,14 @@ if page_mode == "数据准备页":
             default=["1d"],
             key="offline_update_timeframe",
         )
+        offline_update_workers = st.number_input(
+            "并发下载数",
+            min_value=1,
+            max_value=16,
+            value=1,
+            step=1,
+            key="offline_update_workers",
+        )
         refresh_symbol_meta = st.checkbox(
             "刷新股票列表", value=False, key="offline_update_refresh"
         )
@@ -2694,6 +2752,7 @@ if page_mode == "数据准备页":
             export_excel=bool(export_excel_after_update),
             provider_overrides=update_provider_overrides,
             tdx_tqcenter_path=str(st.session_state.get("tdx_tqcenter_path", "")),
+            workers=int(offline_update_workers),
         )
         if ok:
             st.success("本地数据更新完成")
@@ -2714,6 +2773,11 @@ if page_mode == "数据准备页":
             st.code(output)
     st.caption(
         "当前支持按周期分别选择 AKShare / TDX 更新源；当前更新链路已覆盖 1d / 30m / 15m / 5m。"
+    )
+    st.markdown("**相似阶段研究数据检查**")
+    st.caption("相似阶段研究会优先使用 1d 和 30m 的本地 parquet 数据。")
+    st.info(
+        "默认先准备日线数据；如需 30m 研究，请同时更新 30m，并在长历史场景优先验证 TDX 数据源。"
     )
     st.markdown("**指标管理**")
     st.caption("按 探测 → 配置 → 导入 → 状态 → 可用性检查 的顺序管理本地指标。")
@@ -2840,6 +2904,77 @@ if page_mode == "数据准备页":
         st.markdown("**库内已有数据**")
         st.caption("按周期汇总展示已有标的数、总行数和最近更新时间。")
         dataframe_stretch(inventory_summary_df, hide_index=True, height=180)
+    st.markdown("**K线存档资料管理**")
+    st.caption("支持预览后复制或移动 parquet / csv / Excel K 线资料，目录结构会保留。")
+    archive_path_cols = st.columns(2)
+    archive_source_path = archive_path_cols[0].text_input(
+        "源路径",
+        value="data/market",
+        key="kline_archive_source_path",
+    )
+    archive_destination_path = archive_path_cols[1].text_input(
+        "目标目录",
+        value="data/market_archive",
+        key="kline_archive_destination_path",
+    )
+    archive_option_cols = st.columns([1, 1, 2])
+    archive_operation_label = archive_option_cols[0].selectbox(
+        "操作",
+        options=["复制", "移动"],
+        key="kline_archive_operation",
+    )
+    archive_overwrite = archive_option_cols[1].checkbox(
+        "覆盖同名文件",
+        value=False,
+        key="kline_archive_overwrite",
+    )
+    archive_operation = "move" if archive_operation_label == "移动" else "copy"
+    archive_action_cols = st.columns([1, 1, 2])
+    if archive_action_cols[0].button("预览迁移", key="kline_archive_preview"):
+        try:
+            archive_plan = plan_kline_archive_migration(
+                source_path=archive_source_path,
+                destination_path=archive_destination_path,
+                operation=archive_operation,
+                overwrite=bool(archive_overwrite),
+            )
+            st.session_state["kline_archive_plan"] = archive_plan
+            if archive_plan.empty:
+                st.info("未发现可迁移的 K 线资料。")
+            else:
+                st.success(f"已找到 {len(archive_plan)} 个可处理文件。")
+        except Exception as exc:  # noqa: BLE001
+            st.session_state["kline_archive_plan"] = pd.DataFrame()
+            st.error(f"K线资料预览失败：{exc}")
+
+    if archive_action_cols[1].button("执行迁移", key="kline_archive_execute"):
+        try:
+            archive_result = migrate_kline_archive(
+                source_path=archive_source_path,
+                destination_path=archive_destination_path,
+                operation=archive_operation,
+                overwrite=bool(archive_overwrite),
+            )
+            st.session_state["kline_archive_result"] = archive_result
+            if archive_result.empty:
+                st.info("未发现可迁移的 K 线资料。")
+            else:
+                st.success(f"K线资料迁移完成，处理 {len(archive_result)} 个文件。")
+        except Exception as exc:  # noqa: BLE001
+            st.session_state["kline_archive_result"] = pd.DataFrame()
+            st.error(f"K线资料迁移失败：{exc}")
+
+    archive_plan_display = st.session_state.get("kline_archive_plan")
+    if isinstance(archive_plan_display, pd.DataFrame) and not archive_plan_display.empty:
+        st.markdown("**迁移预览**")
+        dataframe_stretch(archive_plan_display, hide_index=True, height=220)
+    archive_result_display = st.session_state.get("kline_archive_result")
+    if (
+        isinstance(archive_result_display, pd.DataFrame)
+        and not archive_result_display.empty
+    ):
+        st.markdown("**迁移结果**")
+        dataframe_stretch(archive_result_display, hide_index=True, height=220)
     preview = load_update_log_preview(limit=20)
     log_action_cols = st.columns([1, 3])
     if log_action_cols[0].button("清空更新日志", key="clear_update_log"):
@@ -3245,6 +3380,88 @@ with st.container():
             step=0.01,
             key="eshb_trigger_buffer_pct",
         )
+    elif entry_factor == "brooks_trend_pullback":
+        st.caption("顺着 Always In 方向，只交易趋势中的两段回撤再突破。")
+        direction_label = render_direction_selectbox(str(entry_factor))
+        brooks_cols = st.columns(4)
+        brooks_cols[0].number_input(
+            "趋势均线周期",
+            min_value=2,
+            value=int(factor_control_default("brooks_pullback_ma_period")),
+            step=1,
+            key="brooks_pullback_ma_period",
+        )
+        brooks_cols[1].number_input(
+            "回撤观察K数",
+            min_value=2,
+            value=int(factor_control_default("brooks_pullback_lookback")),
+            step=1,
+            key="brooks_pullback_lookback",
+        )
+        brooks_cols[2].number_input(
+            "最少逆势K数",
+            min_value=1,
+            value=int(factor_control_default("brooks_pullback_min_countertrend_bars")),
+            step=1,
+            key="brooks_pullback_min_countertrend_bars",
+        )
+        brooks_cols[3].number_input(
+            "最大回撤深度（%）",
+            min_value=0.0,
+            value=float(factor_control_default("brooks_pullback_max_depth_pct")),
+            step=0.1,
+            key="brooks_pullback_max_depth_pct",
+        )
+    elif entry_factor == "brooks_trading_range_reversal":
+        st.caption("只在交易区间极端处，交易失败突破后的反向触发。")
+        direction_label = render_direction_selectbox(str(entry_factor))
+        brooks_cols = st.columns(3)
+        brooks_cols[0].number_input(
+            "区间回看K数",
+            min_value=2,
+            value=int(factor_control_default("brooks_range_lookback")),
+            step=1,
+            key="brooks_range_lookback",
+        )
+        brooks_cols[1].number_input(
+            "假突破缓冲（%）",
+            min_value=0.0,
+            value=float(factor_control_default("brooks_range_break_buffer_pct")),
+            step=0.1,
+            key="brooks_range_break_buffer_pct",
+        )
+        brooks_cols[2].number_input(
+            "最小区间宽度（%）",
+            min_value=0.0,
+            value=float(factor_control_default("brooks_range_min_width_pct")),
+            step=0.1,
+            key="brooks_range_min_width_pct",
+        )
+    elif entry_factor == "brooks_major_trend_reversal":
+        st.caption("旧趋势先被打破，再回测极端点失败，才允许主要趋势反转触发。")
+        direction_label = render_direction_selectbox(str(entry_factor))
+        brooks_cols = st.columns(3)
+        brooks_cols[0].number_input(
+            "反转回看K数",
+            min_value=3,
+            value=int(factor_control_default("brooks_mtr_lookback")),
+            step=1,
+            key="brooks_mtr_lookback",
+        )
+        brooks_cols[1].number_input(
+            "反转均线周期",
+            min_value=2,
+            value=int(factor_control_default("brooks_mtr_ma_period")),
+            step=1,
+            key="brooks_mtr_ma_period",
+        )
+        brooks_cols[2].number_input(
+            "极端点回测缓冲（%）",
+            min_value=0.0,
+            value=float(factor_control_default("brooks_mtr_retest_buffer_pct")),
+            step=0.1,
+            key="brooks_mtr_retest_buffer_pct",
+        )
     else:
         is_acceleration_mode = entry_factor == "candle_run_acceleration"
         st.caption(
@@ -3372,6 +3589,62 @@ eshb_min_breakout_volume_ratio = float(
 eshb_trigger_buffer_pct = float(
     st.session_state.get(
         "eshb_trigger_buffer_pct", factor_control_default("eshb_trigger_buffer_pct")
+    )
+)
+brooks_pullback_ma_period = int(
+    st.session_state.get(
+        "brooks_pullback_ma_period",
+        factor_control_default("brooks_pullback_ma_period"),
+    )
+)
+brooks_pullback_lookback = int(
+    st.session_state.get(
+        "brooks_pullback_lookback", factor_control_default("brooks_pullback_lookback")
+    )
+)
+brooks_pullback_min_countertrend_bars = int(
+    st.session_state.get(
+        "brooks_pullback_min_countertrend_bars",
+        factor_control_default("brooks_pullback_min_countertrend_bars"),
+    )
+)
+brooks_pullback_max_depth_pct = float(
+    st.session_state.get(
+        "brooks_pullback_max_depth_pct",
+        factor_control_default("brooks_pullback_max_depth_pct"),
+    )
+)
+brooks_range_lookback = int(
+    st.session_state.get(
+        "brooks_range_lookback", factor_control_default("brooks_range_lookback")
+    )
+)
+brooks_range_break_buffer_pct = float(
+    st.session_state.get(
+        "brooks_range_break_buffer_pct",
+        factor_control_default("brooks_range_break_buffer_pct"),
+    )
+)
+brooks_range_min_width_pct = float(
+    st.session_state.get(
+        "brooks_range_min_width_pct",
+        factor_control_default("brooks_range_min_width_pct"),
+    )
+)
+brooks_mtr_lookback = int(
+    st.session_state.get(
+        "brooks_mtr_lookback", factor_control_default("brooks_mtr_lookback")
+    )
+)
+brooks_mtr_ma_period = int(
+    st.session_state.get(
+        "brooks_mtr_ma_period", factor_control_default("brooks_mtr_ma_period")
+    )
+)
+brooks_mtr_retest_buffer_pct = float(
+    st.session_state.get(
+        "brooks_mtr_retest_buffer_pct",
+        factor_control_default("brooks_mtr_retest_buffer_pct"),
     )
 )
 
@@ -4028,6 +4301,18 @@ if submitted:
         eshb_min_open_volume_ratio=float(eshb_min_open_volume_ratio),
         eshb_min_breakout_volume_ratio=float(eshb_min_breakout_volume_ratio),
         eshb_trigger_buffer_pct=float(eshb_trigger_buffer_pct),
+        brooks_pullback_ma_period=int(brooks_pullback_ma_period),
+        brooks_pullback_lookback=int(brooks_pullback_lookback),
+        brooks_pullback_min_countertrend_bars=int(
+            brooks_pullback_min_countertrend_bars
+        ),
+        brooks_pullback_max_depth_pct=float(brooks_pullback_max_depth_pct),
+        brooks_range_lookback=int(brooks_range_lookback),
+        brooks_range_break_buffer_pct=float(brooks_range_break_buffer_pct),
+        brooks_range_min_width_pct=float(brooks_range_min_width_pct),
+        brooks_mtr_lookback=int(brooks_mtr_lookback),
+        brooks_mtr_ma_period=int(brooks_mtr_ma_period),
+        brooks_mtr_retest_buffer_pct=float(brooks_mtr_retest_buffer_pct),
         use_ma_filter=bool(use_ma_filter),
         fast_ma_period=int(fast_ma_period),
         slow_ma_period=int(slow_ma_period),
@@ -4137,8 +4422,8 @@ if submitted:
 
     is_batch_per_stock_mode = batch_backtest_mode_label == "逐股独立回测（批量）"
     if is_batch_per_stock_mode:
-        if params.entry_factor not in {"gap", "trend_breakout"}:
-            errors.append("逐股独立回测当前仅支持 gap 与 trend_breakout。")
+        if params.entry_factor == "early_surge_high_base":
+            errors.append("逐股独立回测当前不支持 early_surge_high_base。")
         if len(params.stock_codes) < 2:
             errors.append("逐股独立回测请在股票池至少输入 2 只股票代码。")
 

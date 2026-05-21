@@ -10,8 +10,12 @@ from data_loader import read_data_source_config
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _read_config() -> dict[str, str]:
+    return read_data_source_config()
+
+
 def _daily_file(symbol: str, adjust: str) -> Path:
-    config = read_data_source_config()
+    config = _read_config()
     local_root = ROOT / config["local_data_root"]
     return local_root / adjust / f"{symbol}.parquet"
 

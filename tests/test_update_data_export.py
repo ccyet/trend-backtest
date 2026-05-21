@@ -56,6 +56,26 @@ def test_parse_args_accepts_repeated_provider_flags(monkeypatch) -> None:
     assert args.provider == ["1d=tdx", "5m=akshare"]
 
 
+def test_parse_args_accepts_workers_flag(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["update_data.py", "--workers", "4"])
+
+    args = upd.parse_args()
+
+    assert args.workers == 4
+
+
+def test_normalize_workers_defaults_and_rejects_invalid_values() -> None:
+    assert upd._normalize_workers(None) == 1
+    assert upd._normalize_workers(3) == 3
+
+    try:
+        upd._normalize_workers(0)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+
+
 def test_fetch_bars_for_timeframe_routes_by_provider(monkeypatch):
     calls: list[tuple[str, str]] = []
 
@@ -533,6 +553,19 @@ def test_resolve_incremental_start_keeps_intraday_timestamp_for_1m():
     assert result == "2024-01-02 14:59:00"
 
 
+def test_resolve_incremental_start_backfills_when_requested_start_is_older_than_existing_min():
+    existing = pd.DataFrame(
+        {
+            "date": ["2021-05-17", "2026-05-15"],
+            "symbol": ["399006.SZ", "399006.SZ"],
+        }
+    )
+
+    result = upd._resolve_incremental_start("2019-05-01", existing, "1d")
+
+    assert result == "2019-05-01"
+
+
 def test_resolve_incremental_start_respects_requested_start_for_1m():
     existing = pd.DataFrame(
         {
@@ -544,6 +577,93 @@ def test_resolve_incremental_start_respects_requested_start_for_1m():
     result = upd._resolve_incremental_start("2024-01-04", existing, "1m")
 
     assert result == "2024-01-04 00:00:00"
+
+
+def test_resolve_incremental_windows_skips_fully_covered_range() -> None:
+    existing = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-10"],
+            "symbol": ["000001.SZ", "000001.SZ"],
+        }
+    )
+
+    windows = upd._resolve_incremental_windows(
+        "2024-01-02", "2024-01-09", existing, "1d"
+    )
+
+    assert windows == []
+
+
+def test_resolve_incremental_windows_splits_head_and_tail_gaps() -> None:
+    existing = pd.DataFrame(
+        {
+            "date": ["2024-01-10", "2024-01-20"],
+            "symbol": ["000001.SZ", "000001.SZ"],
+        }
+    )
+
+    windows = upd._resolve_incremental_windows(
+        "2024-01-01", "2024-01-25", existing, "1d"
+    )
+
+    assert windows == [
+        ("2024-01-01", "2024-01-10"),
+        ("2024-01-10", "2024-01-25"),
+    ]
+
+
+def test_update_one_symbol_skips_network_when_requested_range_is_covered(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import pytest
+
+    pytest.importorskip("pyarrow")
+    monkeypatch.setattr(upd, "ROOT", tmp_path)
+    monkeypatch.setattr(upd, "METADATA_DIR", tmp_path / "data" / "market" / "metadata")
+    monkeypatch.setattr(
+        upd,
+        "UPDATE_LOG_PATH",
+        tmp_path / "data" / "market" / "metadata" / "update_log.parquet",
+    )
+    monkeypatch.setattr(upd, "upsert_inventory_row", lambda row: row)
+    monkeypatch.setattr(
+        upd.AkshareProvider, "to_standard_symbol", staticmethod(lambda x: "000001.SZ")
+    )
+    monkeypatch.setattr(
+        upd,
+        "_fetch_bars_for_timeframe",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("covered range should not fetch")
+        ),
+    )
+
+    local_root = tmp_path / "data" / "market" / "daily"
+    parquet_path = local_root / "qfq" / "000001.SZ.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-10"],
+            "symbol": ["000001.SZ", "000001.SZ"],
+            "open": [1.0, 2.0],
+            "high": [1.1, 2.1],
+            "low": [0.9, 1.9],
+            "close": [1.0, 2.0],
+            "volume": [10.0, 20.0],
+            "amount": [100.0, 200.0],
+        }
+    ).to_parquet(parquet_path, index=False)
+
+    ok = upd.update_one_symbol(
+        "000001.SZ",
+        "2024-01-02",
+        "2024-01-09",
+        "qfq",
+        local_root,
+        export_excel=False,
+        timeframe="1d",
+    )
+
+    assert ok
 
 
 def test_update_one_symbol_preserves_root_cause_in_error_message(

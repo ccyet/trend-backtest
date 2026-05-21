@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from data_loader import load_local_parquet_data, resolve_local_data_root
+from data_loader import load_bars, load_local_parquet_data, resolve_local_data_root
 from models import AnalysisParams, validate_params
 
 
@@ -128,6 +128,57 @@ def test_local_parquet_loader_reads_and_filters(tmp_path: Path):
     assert out["stock_code"].nunique() == 1
     assert out["stock_code"].iloc[0] == "000001.SZ"
     assert out["date"].min() <= pd.Timestamp("2024-01-02") <= out["date"].max()
+
+
+def test_local_parquet_loader_reads_only_needed_columns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "daily"
+    qfq = root / "qfq"
+    qfq.mkdir(parents=True, exist_ok=True)
+    parquet_path = qfq / "000001.SZ.parquet"
+    parquet_path.touch()
+    observed_columns: list[tuple[str, ...]] = []
+
+    def fake_read_parquet(path: Path, **kwargs):
+        observed_columns.append(tuple(kwargs.get("columns") or ()))
+        return pd.DataFrame(
+            {
+                "date": ["2024-01-01", "2024-01-02", "2024-01-03"],
+                "stock_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                "open": [1.0, 2.0, 3.0],
+                "high": [1.1, 2.1, 3.1],
+                "low": [0.9, 1.9, 2.9],
+                "close": [1.0, 2.0, 3.0],
+                "volume": [10, 20, 30],
+            }
+        )
+
+    monkeypatch.setattr(pd, "read_parquet", fake_read_parquet)
+
+    out = load_local_parquet_data(
+        "2024-01-02",
+        "2024-01-02",
+        stock_codes=("000001.SZ",),
+        local_data_root=str(root),
+        adjust="qfq",
+    )
+
+    assert not out.empty
+    assert observed_columns
+    assert set(observed_columns[0]) == {
+        "date",
+        "stock_code",
+        "symbol",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "board_ma_ratio_20",
+        "board_ma_ratio_50",
+    }
 
 
 def test_resolve_local_data_root_switches_default_daily_root_for_intraday_socket(tmp_path: Path):
@@ -428,3 +479,69 @@ def test_validate_params_accepts_generic_imported_indicator_exit() -> None:
     )
     errors, _ = validate_params(params)
     assert not errors
+
+
+def test_load_bars_reads_daily_and_preserves_amount(tmp_path: Path):
+    import pytest
+
+    pytest.importorskip("pyarrow")
+    qfq = tmp_path / "market" / "daily" / "qfq"
+    qfq.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-01-02"],
+            "symbol": ["000300.SH", "000300.SH"],
+            "open": [1.0, 1.1],
+            "high": [1.2, 1.3],
+            "low": [0.9, 1.0],
+            "close": [1.1, 1.2],
+            "volume": [100.0, 120.0],
+            "amount": [1000.0, 1300.0],
+        }
+    ).to_parquet(qfq / "000300.SH.parquet", index=False)
+
+    out = load_bars(
+        symbol="000300.SH",
+        timeframe="1d",
+        start_date="2024-01-01",
+        end_date="2024-01-02",
+        local_data_root=str(tmp_path / "market" / "daily"),
+        adjust="qfq",
+    )
+
+    assert out["stock_code"].tolist() == ["000300.SH", "000300.SH"]
+    assert out["amount"].tolist() == [1000.0, 1300.0]
+    assert list(out["date"]) == [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
+
+
+def test_load_bars_reads_30m_from_resolved_intraday_root(tmp_path: Path):
+    import pytest
+
+    pytest.importorskip("pyarrow")
+    qfq = tmp_path / "market" / "30m" / "qfq"
+    qfq.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "date": ["2024-01-02 10:00:00", "2024-01-02 10:30:00"],
+            "symbol": ["000300.SH", "000300.SH"],
+            "open": [10.0, 10.2],
+            "high": [10.3, 10.5],
+            "low": [9.9, 10.1],
+            "close": [10.2, 10.4],
+            "volume": [100.0, 120.0],
+            "amount": [1000.0, 1300.0],
+        }
+    ).to_parquet(qfq / "000300.SH.parquet", index=False)
+
+    out = load_bars(
+        symbol="000300.SH",
+        timeframe="30m",
+        start_date="2024-01-02",
+        end_date="2024-01-02",
+        local_data_root=str(tmp_path / "market" / "daily"),
+        adjust="qfq",
+    )
+
+    assert len(out) == 2
+    assert out["stock_code"].nunique() == 1
+    assert out["date"].iloc[0] == pd.Timestamp("2024-01-02 10:00:00")

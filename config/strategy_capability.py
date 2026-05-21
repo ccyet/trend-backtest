@@ -36,6 +36,18 @@ STRATEGY_CAPABILITIES: dict[str, StrategyCapability] = {
         summary="早盘冲高高位横盘突破仅支持 30m 形态识别。",
         execution_hint="系统会自动挂接 5m 执行链路。",
     ),
+    "brooks_trend_pullback": StrategyCapability(
+        supported_timeframes=("1d",),
+        summary="Brooks 趋势两段回撤当前仅开放日线回测。",
+    ),
+    "brooks_trading_range_reversal": StrategyCapability(
+        supported_timeframes=("1d",),
+        summary="Brooks 交易区间失败突破当前仅开放日线回测。",
+    ),
+    "brooks_major_trend_reversal": StrategyCapability(
+        supported_timeframes=("1d",),
+        summary="Brooks 主要趋势反转当前仅开放日线回测。",
+    ),
 }
 
 

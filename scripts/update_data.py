@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 import sys
+import threading
 
 import pandas as pd
 from typing import cast
@@ -12,10 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.providers.akshare_provider import AkshareProvider
-from data.providers.tdx_quant_provider import TdxQuantProvider
-from data.services.local_inventory_service import upsert_inventory_row
-from data_loader import (
+from data.providers.akshare_provider import AkshareProvider  # noqa: E402
+from data.providers.tdx_quant_provider import TdxQuantProvider  # noqa: E402
+from data.services.local_inventory_service import upsert_inventory_row  # noqa: E402
+from data_loader import (  # noqa: E402
     get_supported_update_sources,
     read_data_source_config,
     resolve_local_data_root,
@@ -33,6 +35,7 @@ TIMEFRAME_EXPORT_DIR = {
     "1m": "1m",
 }
 TIMEFRAME_BACKFILL_DAYS = {"1d": 30, "30m": 10, "15m": 7, "5m": 5, "1m": 3}
+_METADATA_WRITE_LOCK = threading.Lock()
 
 
 def read_config() -> dict[str, str]:
@@ -95,6 +98,10 @@ def _clean_bars(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 
 def _merge_incremental(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
+    if new_df.empty:
+        return old_df.sort_values("date").reset_index(drop=True)
+    if old_df.empty:
+        return new_df.sort_values("date").reset_index(drop=True)
     merged = pd.concat([old_df, new_df], ignore_index=True)
     merged = merged.drop_duplicates(subset=["date"], keep="last")
     merged = merged.sort_values("date").reset_index(drop=True)
@@ -135,6 +142,12 @@ def _resolve_incremental_start(
     if existing_dates.empty:
         return requested_start_ts.strftime("%Y-%m-%d")
 
+    min_existing = existing_dates.min()
+    if timeframe == "1d" and requested_start_ts < min_existing:
+        return requested_start_ts.strftime(
+            "%Y-%m-%d %H:%M:%S" if timeframe != "1d" else "%Y-%m-%d"
+        )
+
     max_existing = existing_dates.max()
     backfill_days = TIMEFRAME_BACKFILL_DAYS.get(timeframe, 5)
     incremental_start = max_existing - pd.Timedelta(days=backfill_days)
@@ -142,6 +155,65 @@ def _resolve_incremental_start(
     return effective_start.strftime(
         "%Y-%m-%d %H:%M:%S" if timeframe != "1d" else "%Y-%m-%d"
     )
+
+
+def _format_window_date(value: pd.Timestamp, timeframe: str) -> str:
+    return value.strftime("%Y-%m-%d %H:%M:%S" if timeframe != "1d" else "%Y-%m-%d")
+
+
+def _resolve_incremental_windows(
+    requested_start: str,
+    requested_end: str,
+    existing_df: pd.DataFrame | None,
+    timeframe: str,
+) -> list[tuple[str, str]]:
+    requested_start_ts = pd.to_datetime(requested_start)
+    requested_end_ts = pd.to_datetime(requested_end)
+    if existing_df is None or existing_df.empty or "date" not in existing_df.columns:
+        return [
+            (
+                _format_window_date(requested_start_ts, timeframe),
+                _format_window_date(requested_end_ts, timeframe),
+            )
+        ]
+
+    existing_dates = pd.to_datetime(existing_df["date"], errors="coerce").dropna()
+    if existing_dates.empty:
+        return [
+            (
+                _format_window_date(requested_start_ts, timeframe),
+                _format_window_date(requested_end_ts, timeframe),
+            )
+        ]
+
+    min_existing = cast(pd.Timestamp, existing_dates.min())
+    max_existing = cast(pd.Timestamp, existing_dates.max())
+    windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    if requested_start_ts < min_existing:
+        windows.append((requested_start_ts, min(requested_end_ts, min_existing)))
+
+    if requested_end_ts > max_existing:
+        backfill_days = TIMEFRAME_BACKFILL_DAYS.get(timeframe, 5)
+        tail_start = max(
+            requested_start_ts,
+            min_existing,
+            max_existing - pd.Timedelta(days=backfill_days),
+        )
+        windows.append((tail_start, requested_end_ts))
+
+    if (
+        not windows
+        and requested_start_ts >= min_existing
+        and requested_end_ts <= max_existing
+    ):
+        return []
+
+    return [
+        (_format_window_date(start, timeframe), _format_window_date(end, timeframe))
+        for start, end in windows
+        if start <= end
+    ]
 
 
 def _build_inventory_row(
@@ -271,21 +343,42 @@ def update_one_symbol(
 
     try:
         existing: pd.DataFrame | None = None
-        fetch_start = start_date
         if symbol_path.exists():
             existing = pd.read_parquet(symbol_path)
             existing["date"] = pd.to_datetime(existing["date"], errors="coerce")
-            fetch_start = _resolve_incremental_start(start_date, existing, timeframe)
-
-        raw = _fetch_bars_for_timeframe(
-            symbol=standardized_symbol,
-            timeframe=timeframe,
-            start_date=fetch_start,
-            end_date=end_date,
-            adjust=adjust,
-            provider=provider,
+        fetch_windows = _resolve_incremental_windows(
+            start_date, end_date, existing, timeframe
         )
-        cleaned = _clean_bars(raw, standardized_symbol)
+
+        cleaned_frames: list[pd.DataFrame] = []
+        for fetch_start, fetch_end in fetch_windows:
+            raw = _fetch_bars_for_timeframe(
+                symbol=standardized_symbol,
+                timeframe=timeframe,
+                start_date=fetch_start,
+                end_date=fetch_end,
+                adjust=adjust,
+                provider=provider,
+            )
+            cleaned_frames.append(_clean_bars(raw, standardized_symbol))
+        cleaned = (
+            pd.concat(cleaned_frames, ignore_index=True)
+            if cleaned_frames
+            else pd.DataFrame(
+                columns=pd.Index(
+                    [
+                        "date",
+                        "symbol",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                        "amount",
+                    ]
+                )
+            )
+        )
 
         if existing is not None:
             merged = _merge_incremental(existing, cleaned)
@@ -324,32 +417,33 @@ def update_one_symbol(
                     )
                 )
 
-    _append_update_log(
-        {
-            "symbol": standardized_symbol,
-            "timeframe": timeframe,
-            "provider": provider,
-            "adjust": adjust,
-            "start_date": start_date,
-            "end_date": end_date,
-            "rows": int(rows),
-            "updated_at": updated_at,
-            "status": status,
-            "error_message": error_message,
-        }
-    )
-    upsert_inventory_row(
-        _build_inventory_row(
-            symbol=standardized_symbol,
-            timeframe=timeframe,
-            adjust=adjust,
-            file_path=symbol_path,
-            final_df=final_df,
-            status=status,
-            error_message=error_message,
-            updated_at=updated_at,
+    with _METADATA_WRITE_LOCK:
+        _append_update_log(
+            {
+                "symbol": standardized_symbol,
+                "timeframe": timeframe,
+                "provider": provider,
+                "adjust": adjust,
+                "start_date": start_date,
+                "end_date": end_date,
+                "rows": int(rows),
+                "updated_at": updated_at,
+                "status": status,
+                "error_message": error_message,
+            }
         )
-    )
+        upsert_inventory_row(
+            _build_inventory_row(
+                symbol=standardized_symbol,
+                timeframe=timeframe,
+                adjust=adjust,
+                file_path=symbol_path,
+                final_df=final_df,
+                status=status,
+                error_message=error_message,
+                updated_at=updated_at,
+            )
+        )
     return status == "success"
 
 
@@ -411,6 +505,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="更新完成后把对应 symbol 另存为 Excel",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="并发更新标的数量，默认 1；网络下载瓶颈明显时可调高",
+    )
     return parser.parse_args()
 
 
@@ -430,6 +530,13 @@ def _normalize_timeframes(timeframes: list[str] | None) -> list[str]:
         seen.add(normalized)
         deduped.append(normalized)
     return deduped or ["1d"]
+
+
+def _normalize_workers(workers: int | None) -> int:
+    normalized = 1 if workers is None else int(workers)
+    if normalized < 1:
+        raise ValueError("--workers 必须大于等于 1。")
+    return normalized
 
 
 def _normalize_provider_overrides(
@@ -470,6 +577,63 @@ def resolve_timeframe_provider(
     return str(config_sources.get(timeframe, "akshare")).strip() or "akshare"
 
 
+def update_symbols_for_timeframe(
+    *,
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    adjust: str,
+    local_root: Path,
+    export_excel: bool,
+    timeframe: str,
+    provider: str,
+    workers: int,
+) -> tuple[int, int]:
+    if workers == 1 or len(symbols) <= 1:
+        success_count = 0
+        failed_count = 0
+        for symbol in symbols:
+            ok = update_one_symbol(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+                local_root=local_root,
+                export_excel=export_excel,
+                timeframe=timeframe,
+                provider=provider,
+            )
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+        return success_count, failed_count
+
+    success_count = 0
+    failed_count = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                update_one_symbol,
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+                local_root=local_root,
+                export_excel=export_excel,
+                timeframe=timeframe,
+                provider=provider,
+            )
+            for symbol in symbols
+        ]
+        for future in as_completed(futures):
+            if bool(future.result()):
+                success_count += 1
+            else:
+                failed_count += 1
+    return success_count, failed_count
+
+
 def main() -> None:
     args = parse_args()
     config = read_config()
@@ -484,11 +648,13 @@ def main() -> None:
     adjust = args.adjust or config["default_adjust"]
     start_date = _normalize_date(args.start_date)
     end_date = _normalize_date(args.end_date)
+    workers = _normalize_workers(cast(int | None, getattr(args, "workers", 1)))
 
-    if args.refresh_symbols or not SYMBOLS_PATH.exists():
+    has_explicit_symbols = bool(args.symbols.strip())
+    if args.refresh_symbols or (not has_explicit_symbols and not SYMBOLS_PATH.exists()):
         update_symbol_metadata()
 
-    if args.symbols.strip():
+    if has_explicit_symbols:
         symbols = [
             AkshareProvider.to_standard_symbol(item.strip())
             for item in args.symbols.split(",")
@@ -516,26 +682,21 @@ def main() -> None:
         local_root = resolve_local_data_root(
             str(ROOT / config["local_data_root"]), timeframe
         )
-        success_count = 0
-        failed_count = 0
+        worker_suffix = f" workers={workers}" if workers > 1 else ""
         print(
-            f"[timeframe={timeframe} source={provider}] 开始更新，共 {len(symbols)} 只标的"
+            f"[timeframe={timeframe} source={provider}{worker_suffix}] 开始更新，共 {len(symbols)} 只标的"
         )
-        for symbol in symbols:
-            ok = update_one_symbol(
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                adjust=adjust,
-                local_root=local_root,
-                export_excel=bool(args.export_excel),
-                timeframe=timeframe,
-                provider=provider,
-            )
-            if ok:
-                success_count += 1
-            else:
-                failed_count += 1
+        success_count, failed_count = update_symbols_for_timeframe(
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            adjust=adjust,
+            local_root=local_root,
+            export_excel=bool(args.export_excel),
+            timeframe=timeframe,
+            provider=provider,
+            workers=workers,
+        )
         print(
             f"[timeframe={timeframe} source={provider}] 更新完成：success={success_count}, failed={failed_count}, total={len(symbols)}"
         )

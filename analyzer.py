@@ -436,6 +436,7 @@ def _scan_trade_candidates_with_context(
                                 execution_df.loc[entry_idx, "entry_factor"] = (
                                     ESHB_ENTRY_FACTOR
                                 )
+                                execution_df.loc[entry_idx, "setup_date"] = setup_time
                                 execution_df.loc[entry_idx, "entry_trigger_price"] = (
                                     trigger_price
                                 )
@@ -445,31 +446,8 @@ def _scan_trade_candidates_with_context(
                                 trade, skip_reason = simulate_trade(
                                     execution_df, entry_idx, params, direction=direction
                                 )
-
-                    if breakout_volume_ratio < params.eshb_min_breakout_volume_ratio:
-                        trade = None
-                        skip_reason = "entry_not_filled"
-                    else:
-                        entry_idx = trigger_idx + 1
-                        if entry_idx >= len(execution_df):
-                            trade = None
-                            skip_reason = "insufficient_future"
-                        else:
-                            execution_df.loc[entry_idx, "entry_factor"] = (
-                                ESHB_ENTRY_FACTOR
-                            )
-                            execution_df.loc[entry_idx, "setup_date"] = setup_time
-                            execution_df.loc[entry_idx, "entry_trigger_price"] = (
-                                trigger_price
-                            )
-                            execution_df.loc[
-                                entry_idx, "eshb_breakout_volume_ratio"
-                            ] = breakout_volume_ratio
-                            trade, skip_reason = simulate_trade(
-                                execution_df, entry_idx, params, direction=direction
-                            )
-                            if trade is not None:
-                                trade["setup_date"] = setup_time
+                                if trade is not None:
+                                    trade["setup_date"] = setup_time
             else:
                 trade, skip_reason = simulate_trade(
                     enriched, signal_idx, params, direction=direction
@@ -1567,6 +1545,10 @@ def _run_per_stock_backtest(
     batch_daily_frames: list[pd.DataFrame] = []
     batch_equity_frames: list[pd.DataFrame] = []
     batch_rows: list[dict[str, Any]] = []
+    stock_data_by_code = {
+        str(stock_code): stock_df.copy()
+        for stock_code, stock_df in all_data.groupby("stock_code", sort=False)
+    }
 
     for stock_code in params.stock_codes:
         single_params = replace(
@@ -1574,9 +1556,7 @@ def _run_per_stock_backtest(
             stock_codes=(stock_code,),
             scan_config=replace(params.scan_config, enabled=False, axes=()),
         )
-        stock_data = all_data.loc[
-            all_data["stock_code"].astype(str) == str(stock_code)
-        ].copy()
+        stock_data = stock_data_by_code.get(str(stock_code), pd.DataFrame())
         (
             single_detail_df,
             single_signal_trace_df,
