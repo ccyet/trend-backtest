@@ -13,6 +13,9 @@ ENTRY_FACTORS = (
     "candle_run",
     "candle_run_acceleration",
     "early_surge_high_base",
+    "brooks_trend_pullback",
+    "brooks_trading_range_reversal",
+    "brooks_major_trend_reversal",
 )
 SCAN_METRICS = (
     "signal_count",
@@ -46,6 +49,16 @@ SCAN_FIELD_CASTERS: dict[str, type[int] | type[float]] = {
     "eshb_min_open_volume_ratio": float,
     "eshb_min_breakout_volume_ratio": float,
     "eshb_trigger_buffer_pct": float,
+    "brooks_pullback_ma_period": int,
+    "brooks_pullback_lookback": int,
+    "brooks_pullback_min_countertrend_bars": int,
+    "brooks_pullback_max_depth_pct": float,
+    "brooks_range_lookback": int,
+    "brooks_range_break_buffer_pct": float,
+    "brooks_range_min_width_pct": float,
+    "brooks_mtr_lookback": int,
+    "brooks_mtr_ma_period": int,
+    "brooks_mtr_retest_buffer_pct": float,
     "atr_filter_period": int,
     "min_atr_filter_pct": float,
     "max_atr_filter_pct": float,
@@ -208,6 +221,34 @@ FACTOR_SCAN_ELIGIBLE_FIELDS: dict[str, frozenset[str]] = {
             "eshb_min_open_volume_ratio",
             "eshb_min_breakout_volume_ratio",
             "eshb_trigger_buffer_pct",
+            *BASE_FACTOR_SCAN_FIELDS,
+            *PARTIAL_EXIT_SCAN_FIELDS,
+        }
+    ),
+    "brooks_trend_pullback": frozenset(
+        {
+            "brooks_pullback_ma_period",
+            "brooks_pullback_lookback",
+            "brooks_pullback_min_countertrend_bars",
+            "brooks_pullback_max_depth_pct",
+            *BASE_FACTOR_SCAN_FIELDS,
+            *PARTIAL_EXIT_SCAN_FIELDS,
+        }
+    ),
+    "brooks_trading_range_reversal": frozenset(
+        {
+            "brooks_range_lookback",
+            "brooks_range_break_buffer_pct",
+            "brooks_range_min_width_pct",
+            *BASE_FACTOR_SCAN_FIELDS,
+            *PARTIAL_EXIT_SCAN_FIELDS,
+        }
+    ),
+    "brooks_major_trend_reversal": frozenset(
+        {
+            "brooks_mtr_lookback",
+            "brooks_mtr_ma_period",
+            "brooks_mtr_retest_buffer_pct",
             *BASE_FACTOR_SCAN_FIELDS,
             *PARTIAL_EXIT_SCAN_FIELDS,
         }
@@ -383,6 +424,16 @@ class AnalysisParams:
     eshb_min_open_volume_ratio: float = 1.2
     eshb_min_breakout_volume_ratio: float = 1.0
     eshb_trigger_buffer_pct: float = 0.05
+    brooks_pullback_ma_period: int = 20
+    brooks_pullback_lookback: int = 5
+    brooks_pullback_min_countertrend_bars: int = 2
+    brooks_pullback_max_depth_pct: float = 8.0
+    brooks_range_lookback: int = 20
+    brooks_range_break_buffer_pct: float = 0.2
+    brooks_range_min_width_pct: float = 4.0
+    brooks_mtr_lookback: int = 20
+    brooks_mtr_ma_period: int = 20
+    brooks_mtr_retest_buffer_pct: float = 1.0
     timeframe: str = "1d"
     local_data_root: str = "data/market/daily"
     adjust: str = "qfq"
@@ -511,6 +562,19 @@ class AnalysisParams:
             lookback = max(
                 lookback,
                 self.eshb_open_window_bars + self.eshb_base_max_bars + 10,
+            )
+        if self.entry_factor == "brooks_trend_pullback":
+            lookback = max(
+                lookback,
+                self.brooks_pullback_ma_period
+                + self.brooks_pullback_lookback
+                + 5,
+            )
+        if self.entry_factor == "brooks_trading_range_reversal":
+            lookback = max(lookback, self.brooks_range_lookback + 5)
+        if self.entry_factor == "brooks_major_trend_reversal":
+            lookback = max(
+                lookback, max(self.brooks_mtr_lookback, self.brooks_mtr_ma_period) + 5
             )
         return lookback
 
@@ -654,7 +718,7 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.entry_factor not in ENTRY_FACTORS:
         errors.append("入场因子不合法。")
-    else:
+    elif params.stock_codes or params.entry_factor == "early_surge_high_base":
         supported_timeframes = get_supported_strategy_timeframes(params.entry_factor)
         if params.timeframe not in supported_timeframes:
             supported_label = " / ".join(supported_timeframes)
@@ -733,6 +797,36 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.eshb_trigger_buffer_pct < 0:
         errors.append("eshb_trigger_buffer_pct 不能为负数。")
+
+    if params.brooks_pullback_ma_period < 2:
+        errors.append("brooks_pullback_ma_period 必须大于等于 2。")
+
+    if params.brooks_pullback_lookback < 2:
+        errors.append("brooks_pullback_lookback 必须大于等于 2。")
+
+    if params.brooks_pullback_min_countertrend_bars < 1:
+        errors.append("brooks_pullback_min_countertrend_bars 必须大于等于 1。")
+
+    if params.brooks_pullback_max_depth_pct < 0:
+        errors.append("brooks_pullback_max_depth_pct 不能为负数。")
+
+    if params.brooks_range_lookback < 2:
+        errors.append("brooks_range_lookback 必须大于等于 2。")
+
+    if params.brooks_range_break_buffer_pct < 0:
+        errors.append("brooks_range_break_buffer_pct 不能为负数。")
+
+    if params.brooks_range_min_width_pct < 0:
+        errors.append("brooks_range_min_width_pct 不能为负数。")
+
+    if params.brooks_mtr_lookback < 3:
+        errors.append("brooks_mtr_lookback 必须大于等于 3。")
+
+    if params.brooks_mtr_ma_period < 2:
+        errors.append("brooks_mtr_ma_period 必须大于等于 2。")
+
+    if params.brooks_mtr_retest_buffer_pct < 0:
+        errors.append("brooks_mtr_retest_buffer_pct 不能为负数。")
 
     if params.entry_factor == "early_surge_high_base":
         if params.timeframe != "30m":

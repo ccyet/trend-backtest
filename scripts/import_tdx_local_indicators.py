@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.providers.akshare_provider import AkshareProvider
-from data.providers.tdx_local_indicator_provider import TdxLocalIndicatorProvider
-from data.services.indicator_catalog_service import (
+from data.providers.akshare_provider import AkshareProvider  # noqa: E402
+from data.providers.tdx_local_indicator_provider import TdxLocalIndicatorProvider  # noqa: E402
+from data.services.indicator_catalog_service import (  # noqa: E402
     sync_registry_manifest,
     upsert_indicator_inventory_row,
 )

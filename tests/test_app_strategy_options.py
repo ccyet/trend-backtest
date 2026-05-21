@@ -55,6 +55,7 @@ def test_app_exposes_new_strategy_modes_and_intraday_timeframe_support() -> None
         "当前支持按周期分别选择 AKShare / TDX 更新源；当前更新链路已覆盖 1d / 30m / 15m / 5m。"
         in captions
     )
+    assert "相似阶段研究会优先使用 1d 和 30m 的本地 parquet 数据。" in captions
 
 
 def test_app_updates_direction_options_for_acceleration_mode() -> None:
@@ -88,6 +89,51 @@ def test_app_exposes_data_prep_page_entry() -> None:
     app.run()
     assert app.radio(key="page_mode").value == "回测工作台"
     assert app.button(key="run_backtest").label == "开始回测"
+
+
+def test_app_exposes_similarity_research_page_with_daily_default() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    page_mode = app.radio(key="page_mode")
+    assert "相似阶段研究" in page_mode.options
+
+    app.radio(key="page_mode").set_value("相似阶段研究")
+    app.run()
+
+    assert app.selectbox(key="similarity_timeframe").value == "1d"
+    assert app.selectbox(key="similarity_timeframe").options == ["1d", "30m"]
+    assert app.selectbox(key="similarity_window_size").options == ["5", "10", "20", "60", "120"]
+    assert app.radio(key="similarity_window_mode").options == ["按窗口长度", "自定义起止"]
+    assert app.button(key="run_similarity_research").label == "运行相似阶段扫描"
+    captions = [caption.value for caption in app.caption]
+    assert "默认先用日线观察阶段结构；需要更细节时切换 30m。" in captions
+
+
+def test_similarity_research_30m_exposes_shorter_windows() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    app.radio(key="page_mode").set_value("相似阶段研究")
+    app.run()
+
+    app.selectbox(key="similarity_timeframe").set_value("30m")
+    app.run()
+
+    assert app.selectbox(key="similarity_window_size").options == ["5", "10", "16", "40", "80", "160"]
+
+
+def test_similarity_research_index_preset_updates_symbol() -> None:
+    app = AppTest.from_file("app.py", default_timeout=10)
+    app.run()
+
+    app.radio(key="page_mode").set_value("相似阶段研究")
+    app.run()
+
+    app.selectbox(key="similarity_index_preset").set_value("创业板指")
+    app.run()
+
+    assert app.text_input(key="similarity_symbol").value == "399006.SZ"
 
 
 def test_app_exposes_candle_run_specific_controls_and_scan_fields() -> None:

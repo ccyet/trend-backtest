@@ -18,11 +18,14 @@ from data.services.local_inventory_service import list_local_symbols_by_timefram
 
 
 REQUIRED_COLUMNS = ("date", "stock_code", "open", "high", "low", "close")
-BASE_OPTIONAL_COLUMNS = ("volume",)
+BASE_OPTIONAL_COLUMNS = ("volume", "amount")
 INDICATOR_OPTIONAL_COLUMNS = tuple(
     column for spec in list_indicator_specs() for column in spec.output_columns
 )
 OPTIONAL_COLUMNS = BASE_OPTIONAL_COLUMNS + INDICATOR_OPTIONAL_COLUMNS
+LOCAL_PARQUET_READ_COLUMNS = tuple(
+    dict.fromkeys((*REQUIRED_COLUMNS, "symbol", *OPTIONAL_COLUMNS))
+)
 SUPPORTED_FILE_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
 TIMEFRAME_DIR_NAMES = {
     "1d": "daily",
@@ -915,6 +918,29 @@ def _list_local_symbols(
     return sorted(path.stem.upper() for path in adjust_dir.glob("*.parquet"))
 
 
+def _available_parquet_columns(file_path: Path) -> tuple[str, ...]:
+    try:
+        import pyarrow.parquet as pq
+
+        return tuple(str(name) for name in pq.ParquetFile(file_path).schema.names)
+    except Exception:  # noqa: BLE001
+        return ()
+
+
+def _read_local_symbol_parquet(file_path: Path) -> pd.DataFrame:
+    available_columns = _available_parquet_columns(file_path)
+    if available_columns:
+        selected_columns = [
+            column for column in LOCAL_PARQUET_READ_COLUMNS if column in available_columns
+        ]
+        return pd.read_parquet(file_path, columns=selected_columns)
+
+    try:
+        return pd.read_parquet(file_path, columns=list(LOCAL_PARQUET_READ_COLUMNS))
+    except Exception:  # noqa: BLE001
+        return pd.read_parquet(file_path)
+
+
 def load_local_parquet_data(
     start_date: str,
     end_date: str,
@@ -943,6 +969,9 @@ def load_local_parquet_data(
     if not symbols:
         raise ValueError("本地 parquet 未找到可用股票数据。")
 
+    query_start, query_end = _calculate_query_window(
+        start_date, end_date, lookback_days, lookahead_days
+    )
     frames: list[pd.DataFrame] = []
     missing_symbols: list[str] = []
     for symbol in symbols:
@@ -951,7 +980,7 @@ def load_local_parquet_data(
             missing_symbols.append(symbol)
             continue
 
-        frame = pd.read_parquet(file_path)
+        frame = _read_local_symbol_parquet(file_path)
         if "stock_code" not in frame.columns and "symbol" in frame.columns:
             frame = frame.rename(columns={"symbol": "stock_code"})
         for required in REQUIRED_COLUMNS:
@@ -959,6 +988,12 @@ def load_local_parquet_data(
                 raise ValueError(f"{file_path.name} 缺少关键列：{required}")
 
         frame = frame.copy()
+        frame["date"] = parse_trade_dates(
+            frame["date"], normalize_to_day=(timeframe == "1d")
+        )
+        frame = frame.loc[frame["date"].between(query_start, query_end)].copy()
+        if frame.empty:
+            continue
         frame["stock_code"] = frame["stock_code"].astype(str).str.upper()
         frames.append(frame)
 
@@ -1009,6 +1044,29 @@ def load_local_parquet_data(
         )
 
     return normalized
+
+
+def load_bars(
+    *,
+    symbol: str,
+    timeframe: str = "1d",
+    start_date: str,
+    end_date: str,
+    local_data_root: str = "data/market/daily",
+    adjust: str = "qfq",
+) -> pd.DataFrame:
+    """Load one symbol's canonical OHLCV bars from local parquet."""
+    normalized_symbol = str(symbol).strip().upper()
+    if not normalized_symbol:
+        raise ValueError("symbol 不能为空。")
+    return load_local_parquet_data(
+        start_date=start_date,
+        end_date=end_date,
+        stock_codes=(normalized_symbol,),
+        local_data_root=local_data_root,
+        adjust=adjust,
+        timeframe=timeframe,
+    ).reset_index(drop=True)
 
 
 def load_market_data(

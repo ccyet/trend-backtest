@@ -56,6 +56,26 @@ def test_parse_args_accepts_repeated_provider_flags(monkeypatch) -> None:
     assert args.provider == ["1d=tdx", "5m=akshare"]
 
 
+def test_parse_args_accepts_workers_flag(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["update_data.py", "--workers", "4"])
+
+    args = upd.parse_args()
+
+    assert args.workers == 4
+
+
+def test_normalize_workers_defaults_and_rejects_invalid_values() -> None:
+    assert upd._normalize_workers(None) == 1
+    assert upd._normalize_workers(3) == 3
+
+    try:
+        upd._normalize_workers(0)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+
+
 def test_fetch_bars_for_timeframe_routes_by_provider(monkeypatch):
     calls: list[tuple[str, str]] = []
 
@@ -531,6 +551,19 @@ def test_resolve_incremental_start_keeps_intraday_timestamp_for_1m():
     result = upd._resolve_incremental_start("2024-01-01", existing, "1m")
 
     assert result == "2024-01-02 14:59:00"
+
+
+def test_resolve_incremental_start_backfills_when_requested_start_is_older_than_existing_min():
+    existing = pd.DataFrame(
+        {
+            "date": ["2021-05-17", "2026-05-15"],
+            "symbol": ["399006.SZ", "399006.SZ"],
+        }
+    )
+
+    result = upd._resolve_incremental_start("2019-05-01", existing, "1d")
+
+    assert result == "2019-05-01"
 
 
 def test_resolve_incremental_start_respects_requested_start_for_1m():

@@ -30,6 +30,14 @@ SIGNAL_COLUMNS = [
 BREAKOUT_ENTRY_FACTORS = frozenset(
     {"trend_breakout", "volatility_contraction_breakout"}
 )
+BROOKS_ENTRY_FACTORS = frozenset(
+    {
+        "brooks_trend_pullback",
+        "brooks_trading_range_reversal",
+        "brooks_major_trend_reversal",
+    }
+)
+STOP_ENTRY_FACTORS = BREAKOUT_ENTRY_FACTORS | BROOKS_ENTRY_FACTORS
 SEQUENCE_ENTRY_FACTORS = frozenset({"candle_run", "candle_run_acceleration"})
 ESHB_ENTRY_FACTOR = "early_surge_high_base"
 BOARD_MA_COLUMNS = {"20": "board_ma_ratio_20", "50": "board_ma_ratio_50"}
@@ -257,6 +265,12 @@ def _build_setup_reason(params: AnalysisParams) -> str:
         return "连续K线加速追势 setup 成立：前序连续K线且实体强度不递减"
     if params.entry_factor == ESHB_ENTRY_FACTOR:
         return "早盘冲高高位横盘 setup 成立：30m 形态已确认"
+    if params.entry_factor == "brooks_trend_pullback":
+        return "Brooks 趋势两段回撤 setup 成立：趋势背景和回撤结构均已确认"
+    if params.entry_factor == "brooks_trading_range_reversal":
+        return "Brooks 交易区间失败突破 setup 成立：区间极端假突破后回到区间内"
+    if params.entry_factor == "brooks_major_trend_reversal":
+        return "Brooks 主要趋势反转 setup 成立：旧趋势衰竭并完成极端点回测"
     return f"{params.entry_factor} setup 成立"
 
 
@@ -273,6 +287,12 @@ def _build_trigger_reason(params: AnalysisParams) -> str:
         return "连续K线加速追势真实触发：下一根K线进入执行点"
     if params.entry_factor == ESHB_ENTRY_FACTOR:
         return "早盘冲高高位横盘真实触发：5m 突破 base high"
+    if params.entry_factor == "brooks_trend_pullback":
+        return "Brooks 趋势两段回撤真实触发：当根突破回撤信号棒"
+    if params.entry_factor == "brooks_trading_range_reversal":
+        return "Brooks 交易区间失败突破真实触发：当根突破失败突破信号棒"
+    if params.entry_factor == "brooks_major_trend_reversal":
+        return "Brooks 主要趋势反转真实触发：当根突破反转信号棒"
     return f"{params.entry_factor} 真实触发"
 
 
@@ -413,6 +433,141 @@ def _build_candle_run_signal_mask(
         )
         signal_mask &= acceleration_ok
     return signal_mask.fillna(False)
+
+
+def _build_brooks_trend_pullback_signal(
+    stock_df: pd.DataFrame, params: AnalysisParams
+) -> tuple[pd.Series, pd.Series]:
+    lookback = int(params.brooks_pullback_lookback)
+    ma_period = int(params.brooks_pullback_ma_period)
+    min_countertrend = int(params.brooks_pullback_min_countertrend_bars)
+    close_series = _column(stock_df, "close")
+    open_series = _column(stock_df, "open")
+    high_series = _column(stock_df, "high")
+    low_series = _column(stock_df, "low")
+    ma_series = pd.Series(close_series.rolling(ma_period).mean(), index=stock_df.index)
+    trigger_price = high_series.shift(1)
+
+    if params.gap_direction == "down":
+        countertrend_bar = close_series.shift(1) > open_series.shift(1)
+        trend_context = close_series.shift(lookback).lt(ma_series.shift(lookback))
+        pullback_high = high_series.shift(1).rolling(lookback).max()
+        prior_swing_low = low_series.shift(1).rolling(lookback).min()
+        depth_pct = (pullback_high / prior_swing_low - 1.0) * 100.0
+        trigger_price = low_series.shift(1)
+        trigger_pass = low_series <= trigger_price
+    else:
+        countertrend_bar = close_series.shift(1) < open_series.shift(1)
+        trend_context = close_series.shift(lookback).gt(ma_series.shift(lookback))
+        prior_swing_high = high_series.shift(1).rolling(lookback).max()
+        pullback_low = low_series.shift(1).rolling(lookback).min()
+        depth_pct = (prior_swing_high / pullback_low - 1.0) * 100.0
+        trigger_pass = high_series >= trigger_price
+
+    countertrend_count = countertrend_bar.rolling(lookback).sum()
+    setup_mask = (
+        trend_context
+        & countertrend_count.ge(float(min_countertrend))
+        & pd.Series(depth_pct, index=stock_df.index).le(
+            params.brooks_pullback_max_depth_pct
+        )
+        & pd.Series(trigger_price, index=stock_df.index).notna()
+    )
+    signal_mask = setup_mask & trigger_pass
+    return pd.Series(signal_mask.fillna(False), index=stock_df.index), pd.Series(
+        trigger_price, index=stock_df.index
+    )
+
+
+def _build_brooks_range_reversal_signal(
+    stock_df: pd.DataFrame, params: AnalysisParams
+) -> tuple[pd.Series, pd.Series]:
+    lookback = int(params.brooks_range_lookback)
+    high_series = _column(stock_df, "high")
+    low_series = _column(stock_df, "low")
+    close_series = _column(stock_df, "close")
+    prior_range_high = high_series.shift(2).rolling(lookback).max()
+    prior_range_low = low_series.shift(2).rolling(lookback).min()
+    range_width_pct = (prior_range_high / prior_range_low - 1.0) * 100.0
+    break_buffer = params.brooks_range_break_buffer_pct / 100.0
+
+    if params.gap_direction == "down":
+        signal_bar_high = high_series.shift(1)
+        signal_bar_close = close_series.shift(1)
+        failed_breakout = (
+            signal_bar_high >= prior_range_high * (1.0 + break_buffer)
+        ) & signal_bar_close.lt(prior_range_high)
+        trigger_price = low_series.shift(1)
+        trigger_pass = low_series <= trigger_price
+    else:
+        signal_bar_low = low_series.shift(1)
+        signal_bar_close = close_series.shift(1)
+        failed_breakout = (
+            signal_bar_low <= prior_range_low * (1.0 - break_buffer)
+        ) & signal_bar_close.gt(prior_range_low)
+        trigger_price = high_series.shift(1)
+        trigger_pass = high_series >= trigger_price
+
+    setup_mask = (
+        prior_range_high.notna()
+        & prior_range_low.notna()
+        & pd.Series(range_width_pct, index=stock_df.index).ge(
+            params.brooks_range_min_width_pct
+        )
+        & failed_breakout
+        & pd.Series(trigger_price, index=stock_df.index).notna()
+    )
+    signal_mask = setup_mask & trigger_pass
+    return pd.Series(signal_mask.fillna(False), index=stock_df.index), pd.Series(
+        trigger_price, index=stock_df.index
+    )
+
+
+def _build_brooks_major_trend_reversal_signal(
+    stock_df: pd.DataFrame, params: AnalysisParams
+) -> tuple[pd.Series, pd.Series]:
+    lookback = int(params.brooks_mtr_lookback)
+    ma_period = int(params.brooks_mtr_ma_period)
+    open_series = _column(stock_df, "open")
+    high_series = _column(stock_df, "high")
+    low_series = _column(stock_df, "low")
+    close_series = _column(stock_df, "close")
+    ma_series = pd.Series(close_series.rolling(ma_period).mean(), index=stock_df.index)
+    retest_buffer = params.brooks_mtr_retest_buffer_pct / 100.0
+
+    if params.gap_direction == "down":
+        prior_extreme = high_series.shift(2).rolling(lookback).max()
+        old_trend = ma_series.shift(2).gt(ma_series.shift(lookback))
+        trendline_break = (
+            close_series.shift(1).lt(ma_series.shift(1)).rolling(lookback).max().eq(1.0)
+        )
+        retest_failed = high_series.shift(1).ge(prior_extreme * (1.0 - retest_buffer))
+        signal_bar = close_series.shift(1).lt(open_series.shift(1))
+        trigger_price = low_series.shift(1)
+        trigger_pass = low_series <= trigger_price
+    else:
+        prior_extreme = low_series.shift(2).rolling(lookback).min()
+        old_trend = ma_series.shift(2).lt(ma_series.shift(lookback))
+        trendline_break = (
+            close_series.shift(1).gt(ma_series.shift(1)).rolling(lookback).max().eq(1.0)
+        )
+        retest_failed = low_series.shift(1).le(prior_extreme * (1.0 + retest_buffer))
+        signal_bar = close_series.shift(1).gt(open_series.shift(1))
+        trigger_price = high_series.shift(1)
+        trigger_pass = high_series >= trigger_price
+
+    setup_mask = (
+        prior_extreme.notna()
+        & old_trend.fillna(False)
+        & trendline_break.fillna(False)
+        & retest_failed.fillna(False)
+        & signal_bar.fillna(False)
+        & pd.Series(trigger_price, index=stock_df.index).notna()
+    )
+    signal_mask = setup_mask & trigger_pass
+    return pd.Series(signal_mask.fillna(False), index=stock_df.index), pd.Series(
+        trigger_price, index=stock_df.index
+    )
 
 
 def _build_eshb_setup_frame(
@@ -558,7 +713,7 @@ def _resolve_entry_execution(
             None,
             entry_factor,
         )
-    if entry_factor not in BREAKOUT_ENTRY_FACTORS:
+    if entry_factor not in STOP_ENTRY_FACTORS:
         return _float_scalar(signal_row["open"]), math.nan, "open", None, entry_factor
 
     trigger_price_raw = signal_row["entry_trigger_price"]
@@ -704,6 +859,27 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
             setup_mask &= stock_df["is_contraction"]
         setup_mask &= stock_df["entry_trigger_price"].notna()
         trigger_mask = setup_mask & _build_breakout_trigger_pass_mask(stock_df, params)
+    elif params.entry_factor == "brooks_trend_pullback":
+        signal_mask, trigger_price = _build_brooks_trend_pullback_signal(
+            stock_df, params
+        )
+        stock_df["entry_trigger_price"] = trigger_price
+        setup_mask = signal_mask.copy()
+        trigger_mask = signal_mask.copy()
+    elif params.entry_factor == "brooks_trading_range_reversal":
+        signal_mask, trigger_price = _build_brooks_range_reversal_signal(
+            stock_df, params
+        )
+        stock_df["entry_trigger_price"] = trigger_price
+        setup_mask = signal_mask.copy()
+        trigger_mask = signal_mask.copy()
+    elif params.entry_factor == "brooks_major_trend_reversal":
+        signal_mask, trigger_price = _build_brooks_major_trend_reversal_signal(
+            stock_df, params
+        )
+        stock_df["entry_trigger_price"] = trigger_price
+        setup_mask = signal_mask.copy()
+        trigger_mask = signal_mask.copy()
     elif params.entry_factor == ESHB_ENTRY_FACTOR:
         setup_frame = _build_eshb_setup_frame(stock_df, params)
         for column in setup_frame.columns:

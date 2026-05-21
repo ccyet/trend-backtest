@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 import sys
+import threading
 
 import pandas as pd
 from typing import cast
@@ -12,10 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.providers.akshare_provider import AkshareProvider
-from data.providers.tdx_quant_provider import TdxQuantProvider
-from data.services.local_inventory_service import upsert_inventory_row
-from data_loader import (
+from data.providers.akshare_provider import AkshareProvider  # noqa: E402
+from data.providers.tdx_quant_provider import TdxQuantProvider  # noqa: E402
+from data.services.local_inventory_service import upsert_inventory_row  # noqa: E402
+from data_loader import (  # noqa: E402
     get_supported_update_sources,
     read_data_source_config,
     resolve_local_data_root,
@@ -33,6 +35,7 @@ TIMEFRAME_EXPORT_DIR = {
     "1m": "1m",
 }
 TIMEFRAME_BACKFILL_DAYS = {"1d": 30, "30m": 10, "15m": 7, "5m": 5, "1m": 3}
+_METADATA_WRITE_LOCK = threading.Lock()
 
 
 def read_config() -> dict[str, str]:
@@ -134,6 +137,12 @@ def _resolve_incremental_start(
     existing_dates = pd.to_datetime(existing_df["date"], errors="coerce").dropna()
     if existing_dates.empty:
         return requested_start_ts.strftime("%Y-%m-%d")
+
+    min_existing = existing_dates.min()
+    if timeframe == "1d" and requested_start_ts < min_existing:
+        return requested_start_ts.strftime(
+            "%Y-%m-%d %H:%M:%S" if timeframe != "1d" else "%Y-%m-%d"
+        )
 
     max_existing = existing_dates.max()
     backfill_days = TIMEFRAME_BACKFILL_DAYS.get(timeframe, 5)
@@ -324,32 +333,33 @@ def update_one_symbol(
                     )
                 )
 
-    _append_update_log(
-        {
-            "symbol": standardized_symbol,
-            "timeframe": timeframe,
-            "provider": provider,
-            "adjust": adjust,
-            "start_date": start_date,
-            "end_date": end_date,
-            "rows": int(rows),
-            "updated_at": updated_at,
-            "status": status,
-            "error_message": error_message,
-        }
-    )
-    upsert_inventory_row(
-        _build_inventory_row(
-            symbol=standardized_symbol,
-            timeframe=timeframe,
-            adjust=adjust,
-            file_path=symbol_path,
-            final_df=final_df,
-            status=status,
-            error_message=error_message,
-            updated_at=updated_at,
+    with _METADATA_WRITE_LOCK:
+        _append_update_log(
+            {
+                "symbol": standardized_symbol,
+                "timeframe": timeframe,
+                "provider": provider,
+                "adjust": adjust,
+                "start_date": start_date,
+                "end_date": end_date,
+                "rows": int(rows),
+                "updated_at": updated_at,
+                "status": status,
+                "error_message": error_message,
+            }
         )
-    )
+        upsert_inventory_row(
+            _build_inventory_row(
+                symbol=standardized_symbol,
+                timeframe=timeframe,
+                adjust=adjust,
+                file_path=symbol_path,
+                final_df=final_df,
+                status=status,
+                error_message=error_message,
+                updated_at=updated_at,
+            )
+        )
     return status == "success"
 
 
@@ -411,6 +421,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="更新完成后把对应 symbol 另存为 Excel",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="并发更新标的数量，默认 1；网络下载瓶颈明显时可调高",
+    )
     return parser.parse_args()
 
 
@@ -430,6 +446,13 @@ def _normalize_timeframes(timeframes: list[str] | None) -> list[str]:
         seen.add(normalized)
         deduped.append(normalized)
     return deduped or ["1d"]
+
+
+def _normalize_workers(workers: int | None) -> int:
+    normalized = 1 if workers is None else int(workers)
+    if normalized < 1:
+        raise ValueError("--workers 必须大于等于 1。")
+    return normalized
 
 
 def _normalize_provider_overrides(
@@ -470,6 +493,63 @@ def resolve_timeframe_provider(
     return str(config_sources.get(timeframe, "akshare")).strip() or "akshare"
 
 
+def update_symbols_for_timeframe(
+    *,
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    adjust: str,
+    local_root: Path,
+    export_excel: bool,
+    timeframe: str,
+    provider: str,
+    workers: int,
+) -> tuple[int, int]:
+    if workers == 1 or len(symbols) <= 1:
+        success_count = 0
+        failed_count = 0
+        for symbol in symbols:
+            ok = update_one_symbol(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+                local_root=local_root,
+                export_excel=export_excel,
+                timeframe=timeframe,
+                provider=provider,
+            )
+            if ok:
+                success_count += 1
+            else:
+                failed_count += 1
+        return success_count, failed_count
+
+    success_count = 0
+    failed_count = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                update_one_symbol,
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+                local_root=local_root,
+                export_excel=export_excel,
+                timeframe=timeframe,
+                provider=provider,
+            )
+            for symbol in symbols
+        ]
+        for future in as_completed(futures):
+            if bool(future.result()):
+                success_count += 1
+            else:
+                failed_count += 1
+    return success_count, failed_count
+
+
 def main() -> None:
     args = parse_args()
     config = read_config()
@@ -484,11 +564,13 @@ def main() -> None:
     adjust = args.adjust or config["default_adjust"]
     start_date = _normalize_date(args.start_date)
     end_date = _normalize_date(args.end_date)
+    workers = _normalize_workers(cast(int | None, getattr(args, "workers", 1)))
 
-    if args.refresh_symbols or not SYMBOLS_PATH.exists():
+    has_explicit_symbols = bool(args.symbols.strip())
+    if args.refresh_symbols or (not has_explicit_symbols and not SYMBOLS_PATH.exists()):
         update_symbol_metadata()
 
-    if args.symbols.strip():
+    if has_explicit_symbols:
         symbols = [
             AkshareProvider.to_standard_symbol(item.strip())
             for item in args.symbols.split(",")
@@ -516,26 +598,21 @@ def main() -> None:
         local_root = resolve_local_data_root(
             str(ROOT / config["local_data_root"]), timeframe
         )
-        success_count = 0
-        failed_count = 0
+        worker_suffix = f" workers={workers}" if workers > 1 else ""
         print(
-            f"[timeframe={timeframe} source={provider}] 开始更新，共 {len(symbols)} 只标的"
+            f"[timeframe={timeframe} source={provider}{worker_suffix}] 开始更新，共 {len(symbols)} 只标的"
         )
-        for symbol in symbols:
-            ok = update_one_symbol(
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                adjust=adjust,
-                local_root=local_root,
-                export_excel=bool(args.export_excel),
-                timeframe=timeframe,
-                provider=provider,
-            )
-            if ok:
-                success_count += 1
-            else:
-                failed_count += 1
+        success_count, failed_count = update_symbols_for_timeframe(
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            adjust=adjust,
+            local_root=local_root,
+            export_excel=bool(args.export_excel),
+            timeframe=timeframe,
+            provider=provider,
+            workers=workers,
+        )
         print(
             f"[timeframe={timeframe} source={provider}] 更新完成：success={success_count}, failed={failed_count}, total={len(symbols)}"
         )

@@ -9,13 +9,16 @@
 
 - 支持 **本地 Parquet / SQLite / Excel/CSV** 作为回测输入
 - 支持 **TDX 量化能力接入**：历史 K 线更新、通达信公式导入本地指标 parquet
-- 当前共有 6 类入场因子：
+- 当前共有 9 类入场因子：
   - `gap`
   - `trend_breakout`
   - `volatility_contraction_breakout`
   - `candle_run`
   - `candle_run_acceleration`
   - `early_surge_high_base`
+  - `brooks_trend_pullback`
+  - `brooks_trading_range_reversal`
+  - `brooks_major_trend_reversal`
 - 导入指标当前可用于：
   - 开仓过滤
   - 整笔离场
@@ -33,13 +36,16 @@
   - 支持调用通达信公式并将结果落地为本地 parquet 指标文件
 - **多数据源回测输入**：本地 Parquet / SQLite / 上传 Excel/CSV
 - **单账户单持仓回测框架**（研究型 long/short 镜像）
-- **六类入场因子**
+- **九类入场因子**
   - `gap`（跳空）
   - `trend_breakout`（趋势突破）
   - `volatility_contraction_breakout`（波动收缩突破）
   - `candle_run`（连续K线追势）
   - `candle_run_acceleration`（连续K线加速追势）
   - `early_surge_high_base`（早盘冲高高位横盘突破）
+  - `brooks_trend_pullback`（Brooks 趋势两段回撤）
+  - `brooks_trading_range_reversal`（Brooks 交易区间失败突破）
+  - `brooks_major_trend_reversal`（Brooks 主要趋势反转）
 - **退出风控体系**
   - 全仓止损
   - 分批退出（2~3 批，按优先级）
@@ -54,7 +60,7 @@
 
 ## 1.1 本次新增方案的落地选择
 
-围绕“连续阳线追涨 / 连续阴线追空”这条扩展线，本次最终**落地 2 个方案**：
+围绕“连续阳线追涨 / 连续阴线追空”和 Al Brooks 价格行为框架，本仓库已落地 5 个扩展方案：
 
 1. `candle_run`
    - 面向连续同向 K 线组合的基础追势方案
@@ -62,8 +68,17 @@
 2. `candle_run_acceleration`
    - 在 `candle_run` 基础上增加“实体强度不递减”的加速约束
    - 适合研究更强势的连续推进场景
+3. `brooks_trend_pullback`
+   - 对应 Brooks 的趋势中 H2 / L2 回撤再入场思想
+   - 先确认趋势背景，再要求回撤窗口内出现足够逆势 K 线，并在信号棒突破时进场
+4. `brooks_trading_range_reversal`
+   - 对应 Brooks 的交易区间上沿/下沿失败突破
+   - 先用区间宽度确认可交易区间，再交易极端假突破回到区间后的反向触发
+5. `brooks_major_trend_reversal`
+   - 对应 Brooks 的主要趋势反转
+   - 旧趋势先衰竭并被均线结构打破，再回测旧极端失败后才触发
 
-这两个方案都已完成参数接线、UI 暴露、信号生成、策略统计与测试覆盖；`30m / 15m` 当前仍作为周期插座保留，未宣称已完成完整多周期回测。
+这些方案都已完成参数接线、UI 暴露、信号生成、策略统计与测试覆盖；`30m / 15m` 当前仍作为周期插座保留，未宣称已完成完整多周期回测。
 
 ### 1.1.1 指标怎么用
 
@@ -336,6 +351,14 @@ python scripts/update_data.py --symbols 000001.SZ --start-date 2024-01-01 --end-
 ```
 
 `30m / 15m` 也可使用同样的 `--provider timeframe=source` 方式切换更新源。
+
+全市场或大股票池更新时可以增加并发下载：
+
+```bash
+python scripts/update_data.py --start-date 2024-01-01 --end-date 2024-12-31 --adjust qfq --timeframe 1d --workers 4
+```
+
+`--workers` 只并发单标的拉取与 parquet 写入，共享的 update log / inventory 元数据仍串行写入，避免并发覆盖。
 
 如需调用通达信公式并导入本地指标，可使用：
 
